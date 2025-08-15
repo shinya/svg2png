@@ -2,24 +2,26 @@ package style
 
 import (
 	"image/color"
+	"log"
 	"strconv"
 	"strings"
+
 	"github.com/shinya/svg2png/pkg/svg2png/parser"
 )
 
 // ComputedStyle は計算されたスタイルを表します
 type ComputedStyle struct {
-	Fill         color.Color
-	FillOpacity  float64
-	Stroke       color.Color
-	StrokeWidth  float64
+	Fill          color.Color
+	FillOpacity   float64
+	Stroke        color.Color
+	StrokeWidth   float64
 	StrokeOpacity float64
-	Opacity      float64
-	FontFamily   string
-	FontSize     float64
-	FontStyle    string
-	FontWeight   string
-	TextAnchor   string
+	Opacity       float64
+	FontFamily    string
+	FontSize      float64
+	FontStyle     string
+	FontWeight    string
+	TextAnchor    string
 }
 
 // StyleResolver はスタイルの解決を行います
@@ -30,9 +32,9 @@ type StyleResolver struct {
 
 // Diagnostics は診断情報を表します
 type Diagnostics struct {
-	Warnings    []string
+	Warnings     []string
 	MissingFonts []string
-	Unsupported []string
+	Unsupported  []string
 }
 
 // NewResolver は新しいスタイル解決器を作成します
@@ -46,28 +48,28 @@ func NewResolver(defaultFamily string) *StyleResolver {
 // Computed は要素の計算されたスタイルを返します
 func (r *StyleResolver) Computed(elem *parser.Element) *ComputedStyle {
 	style := &ComputedStyle{
-		Fill:         color.Black,
-		FillOpacity:  1.0,
-		Stroke:       color.Transparent,
-		StrokeWidth:  0,
+		Fill:          color.Black,
+		FillOpacity:   1.0,
+		Stroke:        color.Transparent,
+		StrokeWidth:   0,
 		StrokeOpacity: 1.0,
-		Opacity:      1.0,
-		FontFamily:   r.defaultFamily,
-		FontSize:     12,
-		FontStyle:    "normal",
-		FontWeight:   "normal",
-		TextAnchor:   "start",
+		Opacity:       1.0,
+		FontFamily:    r.defaultFamily,
+		FontSize:      12,
+		FontStyle:     "normal",
+		FontWeight:    "normal",
+		TextAnchor:    "start",
 	}
-	
+
 	// プレゼンテーション属性の適用
 	r.applyPresentationAttributes(elem, style)
-	
+
 	// style属性の適用
 	r.applyStyleAttribute(elem, style)
-	
+
 	// 継承の適用
 	r.applyInheritance(elem, style)
-	
+
 	return style
 }
 
@@ -129,7 +131,7 @@ func (r *StyleResolver) applyStyleAttribute(elem *parser.Element, style *Compute
 			if len(kv) == 2 {
 				key := strings.TrimSpace(kv[0])
 				value := strings.TrimSpace(kv[1])
-				
+
 				switch key {
 				case "fill":
 					if value != "none" {
@@ -143,7 +145,7 @@ func (r *StyleResolver) applyStyleAttribute(elem *parser.Element, style *Compute
 							style.Stroke = c
 						}
 					}
-				// 他のスタイルプロパティも同様に処理
+					// 他のスタイルプロパティも同様に処理
 				}
 			}
 		}
@@ -159,36 +161,44 @@ func (r *StyleResolver) applyInheritance(elem *parser.Element, style *ComputedSt
 // parseColor は色値を解析します
 func parseColor(value string) (color.Color, error) {
 	value = strings.TrimSpace(value)
-	
+	log.Printf("Parsing color: '%s'", value)
+
 	// 名前付き色
 	if c, ok := namedColors[value]; ok {
+		log.Printf("Found named color: %s -> %v", value, c)
 		return c, nil
 	}
-	
+
 	// 16進数色
 	if strings.HasPrefix(value, "#") {
-		return parseHexColor(value)
+		c, err := parseHexColor(value)
+		log.Printf("Parsed hex color: %s -> %v (error: %v)", value, c, err)
+		return c, err
 	}
-	
+
 	// RGB色
 	if strings.HasPrefix(value, "rgb(") {
-		return parseRGBColor(value)
+		c, err := parseRGBColor(value)
+		log.Printf("Parsed RGB color: %s -> %v (error: %v)", value, c, err)
+		return c, err
 	}
-	
+
 	// currentColor
 	if value == "currentColor" {
+		log.Printf("Using currentColor -> black")
 		return color.Black, nil // デフォルト値
 	}
-	
+
+	log.Printf("Unknown color format: %s, using black", value)
 	return color.Black, nil
 }
 
 // parseHexColor は16進数色を解析します
 func parseHexColor(hex string) (color.Color, error) {
 	hex = strings.TrimPrefix(hex, "#")
-	
+
 	var r, g, b uint8
-	
+
 	switch len(hex) {
 	case 3:
 		// #RGB
@@ -215,7 +225,7 @@ func parseHexColor(hex string) (color.Color, error) {
 	default:
 		return color.Black, nil
 	}
-	
+
 	return color.RGBA{r, g, b, 255}, nil
 }
 
@@ -228,11 +238,27 @@ func parseRGBColor(rgb string) (color.Color, error) {
 
 // namedColors は名前付き色のマップです
 var namedColors = map[string]color.Color{
-	"black":   color.Black,
-	"white":   color.White,
-	"red":     color.RGBA{255, 0, 0, 255},
-	"green":   color.RGBA{0, 255, 0, 255},
-	"blue":    color.RGBA{0, 0, 255, 255},
+	"black":       color.Black,
+	"white":       color.White,
+	"red":         color.RGBA{255, 0, 0, 255},
+	"green":       color.RGBA{0, 255, 0, 255},
+	"blue":        color.RGBA{0, 0, 255, 255},
+	"yellow":      color.RGBA{255, 255, 0, 255},
+	"cyan":        color.RGBA{0, 255, 255, 255},
+	"magenta":     color.RGBA{255, 0, 255, 255},
+	"gray":        color.RGBA{128, 128, 128, 255},
+	"grey":        color.RGBA{128, 128, 128, 255},
+	"darkred":     color.RGBA{139, 0, 0, 255},
+	"darkgreen":   color.RGBA{0, 100, 0, 255},
+	"darkblue":    color.RGBA{0, 0, 139, 255},
+	"darkgray":    color.RGBA{64, 64, 64, 255},
+	"darkgrey":    color.RGBA{64, 64, 64, 255},
+	"lightgray":   color.RGBA{192, 192, 192, 255},
+	"lightgrey":   color.RGBA{192, 192, 192, 255},
+	"orange":      color.RGBA{255, 165, 0, 255},
+	"purple":      color.RGBA{128, 0, 128, 255},
+	"brown":       color.RGBA{165, 42, 42, 255},
+	"pink":        color.RGBA{255, 192, 203, 255},
 	"transparent": color.Transparent,
 }
 

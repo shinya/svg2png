@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/draw"
 	"log"
 	"math"
 	"os"
 
 	"golang.org/x/image/font"
+	"golang.org/x/image/font/basicfont"
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
@@ -121,57 +121,83 @@ func (r *Renderer) ShapeText(text string, fontFamily, fontStyle string, fontSize
 	key := fmt.Sprintf("%s-%s", fontFamily, fontStyle)
 	log.Printf("Attempting to shape text with font: %s", key)
 
-	fontFace, exists := r.fonts[key]
-	if !exists {
-		return nil, fmt.Errorf("font not found: %s %s", fontFamily, fontStyle)
+	// フォントフォールバックの決定
+	actualFontFamily := fontFamily
+	actualFontStyle := fontStyle
+
+	// Arial Unicodeを優先的に使用
+	if fontFamily == "Arial" || fontFamily == "Arial Unicode" {
+		if _, exists := r.fonts["Arial Unicode-Regular"]; exists {
+			actualFontFamily = "Arial Unicode"
+			actualFontStyle = "Regular"
+			log.Printf("Using Arial Unicode for Arial font family")
+		}
 	}
 
-	// Harfbuzzによるシェイピング
+	// フォントが見つからない場合のフォールバック
+	if _, exists := r.fonts[fmt.Sprintf("%s-%s", actualFontFamily, actualFontStyle)]; !exists {
+		log.Printf("Font not found: %s-%s, using basicfont fallback", actualFontFamily, actualFontStyle)
+		return r.shapeWithBasicFont(text, fontSize)
+	}
+
+	// 基本的なテキストラン情報を作成
 	run := &TextRun{
 		Text:       text,
-		FontFamily: fontFamily,
+		FontFamily: actualFontFamily,
 		FontSize:   fontSize,
-		FontStyle:  fontStyle,
+		FontStyle:  actualFontStyle,
 		X:          0,
 		Y:          0,
 		Glyphs:     []*GlyphInfo{},
 	}
 
-	// フォントサイズの設定
-	fontFace.Size = fontSize
-
-	// シェイピングの実行
-	if err := r.shapeWithHarfbuzz(run, fontFace); err != nil {
-		return nil, fmt.Errorf("harfbuzz shaping failed: %w", err)
+	// フォントサイズに基づいて幅と高さを計算
+	if actualFontFamily == "Arial Unicode" {
+		// Arial Unicodeフォントの場合
+		run.Width = float64(len(text)) * fontSize * 0.6 // 概算の文字幅
+		run.Height = fontSize * 1.2                     // 概算の文字高さ
+	} else {
+		// basicfontの場合
+		scale := fontSize / 13.0
+		run.Width = float64(len(text)) * 7 * scale
+		run.Height = 13 * scale
 	}
 
 	log.Printf("Text shaped successfully: %s characters, width=%f, height=%f", len(run.Glyphs), run.Width, run.Height)
 	return run, nil
 }
 
-// shapeWithHarfbuzz はHarfbuzzを使用してテキストをシェイピングします
-func (r *Renderer) shapeWithHarfbuzz(run *TextRun, fontFace *FontFace) error {
-	// 簡易的な実装
-	// 実際の実装では、Harfbuzzの詳細な設定が必要
+// shapeWithBasicFont はbasicfontを使用してテキストをシェイピングします
+func (r *Renderer) shapeWithBasicFont(text string, fontSize float64) (*TextRun, error) {
+	// basicfontのメトリクスを使用
+	scale := fontSize / 13.0 // basicfontの高さは13px
 
-	// 各文字を個別に処理
-	for i, char := range run.Text {
-		glyph, err := r.renderGlyph(char, fontFace)
-		if err != nil {
-			return fmt.Errorf("failed to render glyph for '%c': %w", char, err)
-		}
-
-		// 位置の調整
-		if i > 0 {
-			glyph.X = run.Glyphs[i-1].X + run.Glyphs[i-1].Advance
-		}
-
-		run.Glyphs = append(run.Glyphs, glyph)
-		run.Width += glyph.Advance
-		run.Height = math.Max(run.Height, float64(glyph.Height))
+	run := &TextRun{
+		Text:       text,
+		FontFamily: "BasicFont",
+		FontSize:   fontSize,
+		FontStyle:  "Regular",
+		X:          0,
+		Y:          0,
+		Glyphs:     []*GlyphInfo{},
+		Width:      float64(len(text)) * 7 * scale, // basicfontの文字幅は7px
+		Height:     13 * scale,
 	}
 
-	return nil
+	// 各文字のグリフ情報を作成
+	for i := range text {
+		glyph := &GlyphInfo{
+			X:        float64(i) * 7 * scale,
+			Y:        0,
+			Width:    int(7 * scale),
+			Height:   int(13 * scale),
+			Advance:  7 * scale,
+			Baseline: 0,
+		}
+		run.Glyphs = append(run.Glyphs, glyph)
+	}
+
+	return run, nil
 }
 
 // renderGlyph は個別のグリフをレンダリングします
@@ -216,9 +242,10 @@ func (r *Renderer) drawGlyph(fontFace *FontFace, glyphIndex sfnt.GlyphIndex) (*i
 		return nil, fmt.Errorf("failed to get glyph bounds: %w", err)
 	}
 
-	// 画像サイズの計算
-	width := int(math.Ceil(float64(bounds.Max.X-bounds.Min.X) / 64.0))
-	height := int(math.Ceil(float64(bounds.Max.Y-bounds.Min.Y) / 64.0))
+	// 画像サイズの計算（パディングを追加）
+	padding := 2
+	width := int(math.Ceil(float64(bounds.Max.X-bounds.Min.X)/64.0)) + padding*2
+	height := int(math.Ceil(float64(bounds.Max.Y-bounds.Min.Y)/64.0)) + padding*2
 
 	if width <= 0 || height <= 0 {
 		width = 1
@@ -228,62 +255,217 @@ func (r *Renderer) drawGlyph(fontFace *FontFace, glyphIndex sfnt.GlyphIndex) (*i
 	// 画像の作成
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 
-	// グリフの輪郭を取得
-	// GlyphOutlineが利用できないため、簡易的な描画を実装
-	// 実際の実装では、より精密な輪郭計算が必要
-
-	// グリフの形状を簡易的に描画
-	// 中心部分を塗りつぶし、輪郭を描画
-	centerX := width / 2
-	centerY := height / 2
-
-	// 内部を塗りつぶし
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			// 中心からの距離で内部判定
-			dist := math.Sqrt(float64((x-centerX)*(x-centerX) + (y-centerY)*(y-centerY)))
-			maxDist := math.Min(float64(width), float64(height)) / 2.5
-
-			if dist <= maxDist {
-				img.Set(x, y, color.RGBA{0, 0, 0, 255})
-			}
-		}
-	}
-
-	// 輪郭を描画（簡易的な実装）
-	// 実際の実装では、グリフの輪郭を正確に判定する必要がある
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			// 輪郭の判定（簡易的な実装）
-			if x == 0 || x == width-1 || y == 0 || y == height-1 {
-				// 外枠
-				img.Set(x, y, color.RGBA{0, 0, 0, 255})
-			}
-		}
+	// より正確なグリフ描画の実装
+	// グリフの輪郭を取得して描画
+	if err := r.drawGlyphOutline(fontFace, glyphIndex, img, padding); err != nil {
+		// フォールバック: 簡易的な描画
+		r.drawSimpleGlyph(img, width, height)
 	}
 
 	return img, nil
 }
 
-// RenderTextRun はテキストランを描画します
-func (r *Renderer) RenderTextRun(run *TextRun, target *image.RGBA, x, y float64) error {
-	log.Printf("Rendering text run: %s at (%f, %f)", run.Text, x, y)
-
-	for _, glyph := range run.Glyphs {
-		if glyph.Image == nil {
-			continue
-		}
-
-		// グリフの描画位置を計算
-		gx := int(x + glyph.X)
-		gy := int(y + glyph.Y - glyph.Baseline)
-
-		// グリフをターゲット画像に描画
-		draw.Draw(target, image.Rect(gx, gy, gx+glyph.Width, gy+glyph.Height),
-			glyph.Image, image.Point{0, 0}, draw.Over)
+// drawGlyphOutline はグリフの輪郭を描画します
+func (r *Renderer) drawGlyphOutline(fontFace *FontFace, glyphIndex sfnt.GlyphIndex, img *image.RGBA, padding int) error {
+	// グリフの輪郭を取得
+	segments, err := fontFace.Font.LoadGlyph(nil, glyphIndex, fixed.Int26_6(fontFace.Size*64), nil)
+	if err != nil {
+		return fmt.Errorf("failed to load glyph: %w", err)
 	}
 
-	log.Printf("Text run rendered successfully")
+	// 輪郭を描画
+	for _, segment := range segments {
+		switch segment.Op {
+		case sfnt.SegmentOpMoveTo:
+			// 移動
+			x := int(segment.Args[0].X/64) + padding
+			y := int(segment.Args[0].Y/64) + padding
+			if x >= 0 && x < img.Bounds().Dx() && y >= 0 && y < img.Bounds().Dy() {
+				img.Set(x, y, color.RGBA{0, 0, 0, 255})
+			}
+		case sfnt.SegmentOpLineTo:
+			// 直線
+			x := int(segment.Args[0].X/64) + padding
+			y := int(segment.Args[0].Y/64) + padding
+			if x >= 0 && x < img.Bounds().Dx() && y >= 0 && y < img.Bounds().Dy() {
+				img.Set(x, y, color.RGBA{0, 0, 0, 255})
+			}
+		case sfnt.SegmentOpQuadTo:
+			// 二次ベジェ曲線（簡易的な実装）
+			x := int(segment.Args[1].X/64) + padding
+			y := int(segment.Args[1].Y/64) + padding
+			if x >= 0 && x < img.Bounds().Dx() && y >= 0 && y < img.Bounds().Dy() {
+				img.Set(x, y, color.RGBA{0, 0, 0, 255})
+			}
+		case sfnt.SegmentOpCubeTo:
+			// 三次ベジェ曲線（簡易的な実装）
+			x := int(segment.Args[2].X/64) + padding
+			y := int(segment.Args[2].Y/64) + padding
+			if x >= 0 && x < img.Bounds().Dx() && y >= 0 && y < img.Bounds().Dy() {
+				img.Set(x, y, color.RGBA{0, 0, 0, 255})
+			}
+		}
+	}
+
+	// 輪郭を塗りつぶし
+	r.fillGlyphOutline(img)
+	return nil
+}
+
+// fillGlyphOutline はグリフの輪郭を塗りつぶします
+func (r *Renderer) fillGlyphOutline(img *image.RGBA) {
+	width := img.Bounds().Dx()
+	height := img.Bounds().Dy()
+
+	// フラッドフィルアルゴリズムで塗りつぶし
+	for y := 0; y < height; y++ {
+		fill := false
+		for x := 0; x < width; x++ {
+			_, _, _, a := img.At(x, y).RGBA()
+			if a > 0 {
+				fill = !fill
+			}
+			if fill {
+				img.Set(x, y, color.RGBA{0, 0, 0, 255})
+			}
+		}
+	}
+}
+
+// drawSimpleGlyph は簡易的なグリフ描画（フォールバック）
+func (r *Renderer) drawSimpleGlyph(img *image.RGBA, width, height int) {
+	// basicfontを使用したより良いフォールバック
+	// 基本的な文字形状を描画
+	centerX := width / 2
+	centerY := height / 2
+
+	// 文字の基本形状を描画（例: 長方形の文字）
+	charWidth := width * 3 / 4
+	charHeight := height * 3 / 4
+	startX := centerX - charWidth/2
+	startY := centerY - charHeight/2
+
+	// 文字の輪郭を描画
+	for y := startY; y < startY+charHeight; y++ {
+		for x := startX; x < startX+charWidth; x++ {
+			if x >= 0 && x < width && y >= 0 && y < height {
+				// 輪郭のみ描画
+				if x == startX || x == startX+charWidth-1 || y == startY || y == startY+charHeight-1 {
+					img.Set(x, y, color.RGBA{0, 0, 0, 255})
+				}
+			}
+		}
+	}
+}
+
+// drawWithBasicFont はbasicfontを使用してテキストを描画します
+func (r *Renderer) drawWithBasicFont(text string, target *image.RGBA, x, y float64, textColor color.Color) error {
+	log.Printf("drawWithBasicFont called with text: '%s' at (%f, %f) with color: %v", text, x, y, textColor)
+
+	// basicfontは固定サイズなので、スケーラブルなフォントを優先的に使用
+	// Genevaフォントが利用可能な場合は使用
+	if fontFace, exists := r.fonts["Geneva-Regular"]; exists {
+		return r.drawWithScalableFont(text, target, x, y, 12.0, textColor, fontFace) // デフォルトサイズ
+	}
+
+	// 最もシンプルで確実な描画方法（basicfont）
+	d := &font.Drawer{
+		Dst:  target,
+		Src:  image.NewUniform(textColor),
+		Face: basicfont.Face7x13,
+		Dot:  fixed.Point26_6{X: fixed.Int26_6(x * 64), Y: fixed.Int26_6((y + 13) * 64)}, // ベースライン調整
+	}
+	d.DrawString(text)
+
+	log.Printf("Text drawing completed with basicfont (simple)")
+	return nil
+}
+
+// drawWithScalableFont はスケーラブルなフォントでテキストを描画します
+func (r *Renderer) drawWithScalableFont(text string, target *image.RGBA, x, y float64, fontSize float64, textColor color.Color, fontFace *FontFace) error {
+	log.Printf("drawWithScalableFont called with text: '%s' at (%f, %f) with size %f and color: %v", text, x, y, fontSize, textColor)
+
+	// スケーラブルなフォントで描画
+	face, err := opentype.NewFace(fontFace.OTFont, &opentype.FaceOptions{
+		Size:    fontSize,
+		DPI:     96,
+		Hinting: font.HintingFull,
+	})
+	if err != nil {
+		log.Printf("Failed to create font face, falling back to basicfont: %v", err)
+		return r.drawWithBasicFont(text, target, x, y, textColor)
+	}
+	defer face.Close()
+
+	// ベースライン位置を調整（SVGのy座標はベースライン位置）
+	baselineY := y + fontSize*0.7 // フォントサイズの70%をベースラインオフセットとして使用
+
+	d := &font.Drawer{
+		Dst:  target,
+		Src:  image.NewUniform(textColor),
+		Face: face,
+		Dot:  fixed.Point26_6{X: fixed.Int26_6(x * 64), Y: fixed.Int26_6(baselineY * 64)},
+	}
+	d.DrawString(text)
+
+	log.Printf("Text drawing completed with scalable font (size: %f)", fontSize)
+	return nil
+}
+
+// RenderTextRun はテキストランを描画します
+func (r *Renderer) RenderTextRun(run *TextRun, target *image.RGBA, x, y float64, textColor color.Color) error {
+	log.Printf("Rendering text run: %s at (%f, %f) with color: %v, font size: %f", run.Text, x, y, textColor, run.FontSize)
+
+	// Arial Unicodeフォントが利用可能な場合は使用
+	if run.FontFamily == "Arial Unicode" {
+		return r.drawWithArialUnicode(run.Text, target, x, y, run.FontSize, textColor)
+	}
+
+	// Genevaフォントが利用可能な場合は使用
+	if fontFace, exists := r.fonts["Geneva-Regular"]; exists {
+		return r.drawWithScalableFont(run.Text, target, x, y, run.FontSize, textColor, fontFace)
+	}
+
+	// その他の場合はbasicfontを使用（サイズは無視されるが、スケールされたサイズを記録）
+	log.Printf("Using basicfont with scaled size: %f (will be ignored)", run.FontSize)
+	return r.drawWithBasicFont(run.Text, target, x, y, textColor)
+}
+
+// drawWithArialUnicode はArial Unicodeフォントでテキストを描画します
+func (r *Renderer) drawWithArialUnicode(text string, target *image.RGBA, x, y float64, fontSize float64, textColor color.Color) error {
+	log.Printf("drawWithArialUnicode called with text: '%s' at (%f, %f) with size %f and color: %v", text, x, y, fontSize, textColor)
+
+	// Arial Unicodeフォントを取得
+	fontFace, exists := r.fonts["Arial Unicode-Regular"]
+	if !exists {
+		log.Printf("Arial Unicode font not found, falling back to basicfont")
+		return r.drawWithBasicFont(text, target, x, y, textColor)
+	}
+
+	// シンプルで確実な描画方法
+	face, err := opentype.NewFace(fontFace.OTFont, &opentype.FaceOptions{
+		Size:    fontSize,
+		DPI:     96,
+		Hinting: font.HintingFull,
+	})
+	if err != nil {
+		log.Printf("Failed to create font face, falling back to basicfont: %v", err)
+		return r.drawWithBasicFont(text, target, x, y, textColor)
+	}
+	defer face.Close()
+
+	// ベースライン位置を調整（SVGのy座標はベースライン位置）
+	baselineY := y + fontSize*0.7 // フォントサイズの70%をベースラインオフセットとして使用
+
+	d := &font.Drawer{
+		Dst:  target,
+		Src:  image.NewUniform(textColor),
+		Face: face,
+		Dot:  fixed.Point26_6{X: fixed.Int26_6(x * 64), Y: fixed.Int26_6(baselineY * 64)},
+	}
+	d.DrawString(text)
+
+	log.Printf("Text drawing completed with Arial Unicode (simple)")
 	return nil
 }
 

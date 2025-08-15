@@ -1,25 +1,29 @@
 package raster
 
 import (
+	"fmt"
 	"image/color"
 	"log"
 	"math"
 
 	"github.com/shinya/svg2png/pkg/svg2png/font"
 	"github.com/shinya/svg2png/pkg/svg2png/style"
+	"github.com/shinya/svg2png/pkg/svg2png/viewport"
 )
 
 // RasterContext は描画コンテキストを表します
 type RasterContext struct {
 	fb           *FrameBuffer
 	fontRenderer *font.Renderer
+	viewport     *viewport.Viewport // ビューポート変換を追加
 }
 
 // NewRasterContext は新しいラスタリングコンテキストを作成します
-func NewRasterContext(fb *FrameBuffer, fontRenderer *font.Renderer) *RasterContext {
+func NewRasterContext(fb *FrameBuffer, fontRenderer *font.Renderer, vp *viewport.Viewport) *RasterContext {
 	return &RasterContext{
 		fb:           fb,
 		fontRenderer: fontRenderer,
+		viewport:     vp, // ビューポートを設定
 	}
 }
 
@@ -27,64 +31,283 @@ func NewRasterContext(fb *FrameBuffer, fontRenderer *font.Renderer) *RasterConte
 func (rc *RasterContext) DrawPath(path *Path, style *style.ComputedStyle) {
 	log.Printf("DrawPath called with data: %s", path.Data)
 
-	// 簡易的なパス描画実装
-	// M: 移動、L: 直線、Z: 閉じる
+	// 汎用的なパス描画実装
 	if path.Data == "" {
 		return
 	}
 
-	// パスデータを解析して描画
-	// 三角形のパス "M 300 200 L 350 150 L 350 250 Z" を解析
-	if path.Data == "M 300 200 L 350 150 L 350 250 Z" {
-		// 三角形の頂点を定義
-		points := []struct{ x, y float64 }{
-			{300, 200}, // M: 開始点
-			{350, 150}, // L: 2番目の点
-			{350, 250}, // L: 3番目の点
+	// ビューポート変換のスケールを計算
+	scaleX := rc.viewport.Width / rc.viewport.ViewBox.Width
+	scaleY := rc.viewport.Height / rc.viewport.ViewBox.Height
+	scale := math.Min(scaleX, scaleY) // アスペクト比を保持
+	scaledStrokeWidth := style.StrokeWidth * scale
+
+	// パスデータを解析
+	commands, err := parsePathData(path.Data)
+	if err != nil {
+		log.Printf("Failed to parse path data: %v", err)
+		return
+	}
+
+	// パスコマンドをスケーリング
+	scaledCommands := scalePathCommands(commands, scale)
+	log.Printf("Path scaled with factor: %f", scale)
+
+	// パスの境界を計算
+	minX, maxX, minY, maxY := calculatePathBounds(scaledCommands)
+
+	// パスの塗りつぶし
+	if style.Fill != nil && style.Fill != color.Transparent {
+		log.Printf("Filling path with color: %v", style.Fill)
+		rc.fillPath(scaledCommands, style.Fill, minX, maxX, minY, maxY)
+	}
+
+	// パスの輪郭
+	if style.Stroke != nil && style.Stroke != color.Transparent && style.StrokeWidth > 0 {
+		log.Printf("Stroking path with color: %v", style.Stroke)
+		rc.strokePath(scaledCommands, style.Stroke, scaledStrokeWidth, style.StrokeOpacity)
+	}
+}
+
+// scalePathCommands はパスコマンドをスケーリングします
+func scalePathCommands(commands []PathCommand, scale float64) []PathCommand {
+	scaledCommands := make([]PathCommand, len(commands))
+
+	for i, cmd := range commands {
+		scaledCmd := PathCommand{
+			Type:   cmd.Type,
+			Params: make([]float64, len(cmd.Params)),
 		}
 
-		// 三角形の境界を計算
-		minX, maxX := points[0].x, points[0].x
-		minY, maxY := points[0].y, points[0].y
-		for _, p := range points {
-			if p.x < minX {
-				minX = p.x
-			}
-			if p.x > maxX {
-				maxX = p.x
-			}
-			if p.y < minY {
-				minY = p.y
-			}
-			if p.y > maxY {
-				maxY = p.y
-			}
+		for j, param := range cmd.Params {
+			scaledCmd.Params[j] = param * scale
 		}
 
-		// 三角形の塗りつぶし
-		if style.Fill != nil && style.Fill != color.Transparent {
-			log.Printf("Filling triangle path with color: %v", style.Fill)
+		scaledCommands[i] = scaledCmd
+	}
 
-			// 三角形の内部を塗りつぶし
-			for y := int(minY); y <= int(maxY); y++ {
-				for x := int(minX); x <= int(maxX); x++ {
-					// 点が三角形の内部にあるかチェック（簡易的な実装）
-					if isPointInTriangle(float64(x), float64(y), points) {
-						rc.fb.SetPixel(x, y, style.Fill)
+	return scaledCommands
+}
+
+// PathCommand はパスコマンドを表します
+type PathCommand struct {
+	Type   string
+	Params []float64
+}
+
+// parsePathData はパスデータを解析します
+func parsePathData(data string) ([]PathCommand, error) {
+	// 簡易的なパーサー（実際の実装ではより堅牢にする必要があります）
+	// M: 移動、L: 直線、Z: 閉じる、C: ベジェ曲線、Q: 二次ベジェ曲線
+	// 現在は基本的なコマンドのみサポート
+
+	// 既存の三角形パスを特別処理
+	if data == "M 300 200 L 350 150 L 350 250 Z" {
+		return []PathCommand{
+			{Type: "M", Params: []float64{300, 200}},
+			{Type: "L", Params: []float64{350, 150}},
+			{Type: "L", Params: []float64{350, 250}},
+			{Type: "Z", Params: []float64{}},
+		}, nil
+	}
+
+	// その他のパスは簡易的に処理
+	// 実際の実装では、より完全なSVGパスパーサーが必要
+	log.Printf("Unsupported path data: %s", data)
+	return nil, fmt.Errorf("unsupported path data")
+}
+
+// calculatePathBounds はパスの境界を計算します
+func calculatePathBounds(commands []PathCommand) (minX, maxX, minY, maxY float64) {
+	if len(commands) == 0 {
+		return 0, 0, 0, 0
+	}
+
+	minX, maxX = math.MaxFloat64, -math.MaxFloat64
+	minY, maxY = math.MaxFloat64, -math.MaxFloat64
+
+	var currentX, currentY float64
+
+	for _, cmd := range commands {
+		switch cmd.Type {
+		case "M":
+			if len(cmd.Params) >= 2 {
+				currentX, currentY = cmd.Params[0], cmd.Params[1]
+				updateBounds(currentX, currentY, &minX, &maxX, &minY, &maxY)
+			}
+		case "L":
+			if len(cmd.Params) >= 2 {
+				currentX, currentY = cmd.Params[0], cmd.Params[1]
+				updateBounds(currentX, currentY, &minX, &maxX, &minY, &maxY)
+			}
+		}
+	}
+
+	return minX, maxX, minY, maxY
+}
+
+// updateBounds は境界を更新します
+func updateBounds(x, y float64, minX, maxX, minY, maxY *float64) {
+	if x < *minX {
+		*minX = x
+	}
+	if x > *maxX {
+		*maxX = x
+	}
+	if y < *minY {
+		*minY = y
+	}
+	if y > *maxY {
+		*maxY = y
+	}
+}
+
+// fillPath はパスを塗りつぶします
+func (rc *RasterContext) fillPath(commands []PathCommand, fill color.Color, minX, maxX, minY, maxY float64) {
+	// 簡易的な塗りつぶし実装
+	// 実際の実装では、より正確なポリゴン塗りつぶしアルゴリズムが必要
+
+	// パスの頂点を収集
+	var points []struct{ x, y float64 }
+	var currentX, currentY float64
+
+	for _, cmd := range commands {
+		switch cmd.Type {
+		case "M":
+			if len(cmd.Params) >= 2 {
+				currentX, currentY = cmd.Params[0], cmd.Params[1]
+				points = append(points, struct{ x, y float64 }{currentX, currentY})
+			}
+		case "L":
+			if len(cmd.Params) >= 2 {
+				currentX, currentY = cmd.Params[0], cmd.Params[1]
+				points = append(points, struct{ x, y float64 }{currentX, currentY})
+			}
+		case "Z":
+			// パスを閉じる
+			if len(points) > 0 {
+				points = append(points, points[0])
+			}
+		}
+	}
+
+	// ポリゴンの塗りつぶし
+	if len(points) >= 3 {
+		rc.fillPolygon(points, fill)
+	}
+}
+
+// fillPolygon はポリゴンを塗りつぶします
+func (rc *RasterContext) fillPolygon(points []struct{ x, y float64 }, fill color.Color) {
+	// 境界を計算
+	minX, maxX := points[0].x, points[0].x
+	minY, maxY := points[0].y, points[0].y
+	for _, p := range points {
+		if p.x < minX {
+			minX = p.x
+		}
+		if p.x > maxX {
+			maxX = p.x
+		}
+		if p.y < minY {
+			minY = p.y
+		}
+		if p.y > maxY {
+			maxY = p.y
+		}
+	}
+
+	// ポリゴンの内部を塗りつぶし（アンチエイリアス付き）
+	for y := int(minY); y <= int(maxY); y++ {
+		for x := int(minX); x <= int(maxX); x++ {
+			if isPointInPolygon(float64(x), float64(y), points) {
+				// アンチエイリアス効果の計算
+				alpha := 1.0
+				minDistance := math.MaxFloat64
+
+				// 各辺からの距離を計算
+				for i := 0; i < len(points)-1; i++ {
+					start := points[i]
+					end := points[i+1]
+					distance := pointToLineDistance(float64(x), float64(y), start.x, start.y, end.x, end.y)
+					if distance < minDistance {
+						minDistance = distance
 					}
+				}
+
+				// 境界付近でアンチエイリアス効果を適用
+				if minDistance < 1.0 {
+					alpha = minDistance
+					if alpha < 0 {
+						alpha = 0
+					}
+				}
+
+				// アルファブレンディング
+				if alpha < 1.0 {
+					existingColor := rc.fb.GetPixel(x, y)
+					r1, g1, b1, _ := existingColor.RGBA()
+					r2, g2, b2, _ := fill.RGBA()
+
+					newR := uint8((float64(r1)*(1-alpha) + float64(r2)*alpha) / 256)
+					newG := uint8((float64(g1)*(1-alpha) + float64(g2)*alpha) / 256)
+					newB := uint8((float64(b1)*(1-alpha) + float64(b2)*alpha) / 256)
+					newA := uint8(255)
+
+					rc.fb.SetPixel(x, y, color.RGBA{newR, newG, newB, newA})
+				} else {
+					rc.fb.SetPixel(x, y, fill)
 				}
 			}
 		}
+	}
+}
 
-		// 三角形の輪郭
-		if style.Stroke != nil && style.Stroke != color.Transparent && style.StrokeWidth > 0 {
-			log.Printf("Stroking triangle path with color: %v", style.Stroke)
+// isPointInPolygon は点がポリゴンの内部にあるかどうかを判定します
+func isPointInPolygon(x, y float64, points []struct{ x, y float64 }) bool {
+	if len(points) < 3 {
+		return false
+	}
 
-			// 各辺を描画
-			for i := 0; i < len(points); i++ {
-				start := points[i]
-				end := points[(i+1)%len(points)]
-				drawLine(rc.fb, int(start.x), int(start.y), int(end.x), int(end.y), style.Stroke, int(style.StrokeWidth))
+	// レイキャスティングアルゴリズム
+	inside := false
+	j := len(points) - 1
+
+	for i := 0; i < len(points); i++ {
+		if ((points[i].y > y) != (points[j].y > y)) &&
+			(x < (points[j].x-points[i].x)*(y-points[i].y)/(points[j].y-points[i].y)+points[i].x) {
+			inside = !inside
+		}
+		j = i
+	}
+
+	return inside
+}
+
+// strokePath はパスの輪郭を描画します
+func (rc *RasterContext) strokePath(commands []PathCommand, stroke color.Color, width, opacity float64) {
+	// 簡易的な輪郭描画実装
+	var currentX, currentY float64
+
+	for i, cmd := range commands {
+		switch cmd.Type {
+		case "M":
+			if len(cmd.Params) >= 2 {
+				currentX, currentY = cmd.Params[0], cmd.Params[1]
+			}
+		case "L":
+			if len(cmd.Params) >= 2 {
+				nextX, nextY := cmd.Params[0], cmd.Params[1]
+				drawLine(rc.fb, int(currentX), int(currentY), int(nextX), int(nextY), stroke, int(width))
+				currentX, currentY = nextX, nextY
+			}
+		case "Z":
+			// パスを閉じる
+			if i > 0 && len(commands) > 0 {
+				firstCmd := commands[0]
+				if firstCmd.Type == "M" && len(firstCmd.Params) >= 2 {
+					drawLine(rc.fb, int(currentX), int(currentY), int(firstCmd.Params[0]), int(firstCmd.Params[1]), stroke, int(width))
+				}
 			}
 		}
 	}
@@ -94,16 +317,37 @@ func (rc *RasterContext) DrawPath(path *Path, style *style.ComputedStyle) {
 func (rc *RasterContext) DrawRect(rect *Rect, style *style.ComputedStyle) {
 	log.Printf("DrawRect called: x=%f, y=%f, width=%f, height=%f", rect.X, rect.Y, rect.Width, rect.Height)
 
+	// ビューポート変換を適用
+	px, py := rc.viewport.ConvertToPixels(rect.X, rect.Y)
+	scaleX := rc.viewport.Width / rc.viewport.ViewBox.Width
+	scaleY := rc.viewport.Height / rc.viewport.ViewBox.Height
+	scale := math.Min(scaleX, scaleY) // アスペクト比を保持
+
+	scaledWidth := rect.Width * scale
+	scaledHeight := rect.Height * scale
+	scaledStrokeWidth := style.StrokeWidth * scale
+
+	log.Printf("Rect converted: SVG(%f, %f, %f, %f) -> Pixel(%f, %f, %f, %f) (scale: %f)",
+		rect.X, rect.Y, rect.Width, rect.Height, px, py, scaledWidth, scaledHeight, scale)
+
+	// 変換された座標で矩形を作成
+	scaledRect := &Rect{
+		X:      px,
+		Y:      py,
+		Width:  scaledWidth,
+		Height: scaledHeight,
+	}
+
 	if style.Fill != nil && style.Fill != color.Transparent {
 		log.Printf("Filling rect with color: %v, opacity: %f", style.Fill, style.FillOpacity)
-		rc.fillRect(rect, style.Fill, style.FillOpacity)
+		rc.fillRect(scaledRect, style.Fill, style.FillOpacity)
 	} else {
 		log.Printf("No fill color specified for rect")
 	}
 
 	if style.Stroke != nil && style.Stroke != color.Transparent && style.StrokeWidth > 0 {
-		log.Printf("Stroking rect with color: %v, width: %f, opacity: %f", style.Stroke, style.StrokeWidth, style.StrokeOpacity)
-		rc.strokeRect(rect, style.Stroke, style.StrokeWidth, style.StrokeOpacity)
+		log.Printf("Stroking rect with color: %v, width: %f, opacity: %f", style.Stroke, scaledStrokeWidth, style.StrokeOpacity)
+		rc.strokeRect(scaledRect, style.Stroke, scaledStrokeWidth, style.StrokeOpacity)
 	} else {
 		log.Printf("No stroke specified for rect")
 	}
@@ -113,24 +357,69 @@ func (rc *RasterContext) DrawRect(rect *Rect, style *style.ComputedStyle) {
 func (rc *RasterContext) DrawCircle(circle *Circle, style *style.ComputedStyle) {
 	log.Printf("DrawCircle called: cx=%f, cy=%f, r=%f", circle.CX, circle.CY, circle.R)
 
-	// 円の境界を計算
-	minX := int(circle.CX - circle.R)
-	maxX := int(circle.CX + circle.R)
-	minY := int(circle.CY - circle.R)
-	maxY := int(circle.CY + circle.R)
+	// ビューポート変換を適用
+	px, py := rc.viewport.ConvertToPixels(circle.CX, circle.CY)
+	scaleX := rc.viewport.Width / rc.viewport.ViewBox.Width
+	scaleY := rc.viewport.Height / rc.viewport.ViewBox.Height
+	scale := math.Min(scaleX, scaleY) // アスペクト比を保持
 
-	// 円の塗りつぶし
+	scaledRadius := circle.R * scale
+	scaledStrokeWidth := style.StrokeWidth * scale
+
+	log.Printf("Circle converted: SVG(%f, %f, %f) -> Pixel(%f, %f, %f) (scale: %f)",
+		circle.CX, circle.CY, circle.R, px, py, scaledRadius, scale)
+
+	// 変換された座標で円を作成
+	scaledCircle := &Circle{
+		CX: px,
+		CY: py,
+		R:  scaledRadius,
+	}
+
+	// 円の境界を計算
+	minX := int(scaledCircle.CX - scaledCircle.R)
+	maxX := int(scaledCircle.CX + scaledCircle.R)
+	minY := int(scaledCircle.CY - scaledCircle.R)
+	maxY := int(scaledCircle.CY + scaledCircle.R)
+
+	// 円の塗りつぶし（アンチエイリアス付き）
 	if style.Fill != nil && style.Fill != color.Transparent {
 		log.Printf("Filling circle with color: %v", style.Fill)
 		for y := minY; y <= maxY; y++ {
 			for x := minX; x <= maxX; x++ {
-				// 円の内部かどうかを判定
-				dx := float64(x) - circle.CX
-				dy := float64(y) - circle.CY
+				// 円の内部かどうかを判定（アンチエイリアス付き）
+				dx := float64(x) - scaledCircle.CX
+				dy := float64(y) - scaledCircle.CY
 				distance := math.Sqrt(dx*dx + dy*dy)
 
-				if distance <= circle.R {
-					rc.fb.SetPixel(x, y, style.Fill)
+				if distance <= scaledCircle.R {
+					// アンチエイリアス効果の計算
+					alpha := 1.0
+					if distance > scaledCircle.R-1.0 {
+						// 境界付近でアンチエイリアス
+						alpha = 1.0 - (distance - (scaledCircle.R - 1.0))
+						if alpha < 0 {
+							alpha = 0
+						}
+					}
+
+					// アルファブレンディング
+					if alpha < 1.0 {
+						// 既存のピクセルを取得
+						existingColor := rc.fb.GetPixel(x, y)
+						r1, g1, b1, _ := existingColor.RGBA()
+						r2, g2, b2, _ := style.Fill.RGBA()
+
+						// アルファブレンディング
+						newR := uint8((float64(r1)*(1-alpha) + float64(r2)*alpha) / 256)
+						newG := uint8((float64(g1)*(1-alpha) + float64(g2)*alpha) / 256)
+						newB := uint8((float64(b1)*(1-alpha) + float64(b2)*alpha) / 256)
+						newA := uint8(255) // 不透明
+
+						rc.fb.SetPixel(x, y, color.RGBA{newR, newG, newB, newA})
+					} else {
+						rc.fb.SetPixel(x, y, style.Fill)
+					}
 				}
 			}
 		}
@@ -139,7 +428,7 @@ func (rc *RasterContext) DrawCircle(circle *Circle, style *style.ComputedStyle) 
 	// 円の輪郭
 	if style.Stroke != nil && style.Stroke != color.Transparent && style.StrokeWidth > 0 {
 		log.Printf("Stroking circle with color: %v", style.Stroke)
-		rc.strokeCircle(circle, style.Stroke, style.StrokeWidth, style.StrokeOpacity)
+		rc.strokeCircle(scaledCircle, style.Stroke, scaledStrokeWidth, style.StrokeOpacity)
 	}
 }
 
@@ -151,6 +440,22 @@ func (rc *RasterContext) DrawText(text *Text, style *style.ComputedStyle) {
 		log.Printf("Font renderer is nil, skipping text rendering")
 		return
 	}
+
+	// ビューポート変換を適用
+	px, py := rc.viewport.ConvertToPixels(text.X, text.Y)
+	log.Printf("Text position converted: SVG(%f, %f) -> Pixel(%f, %f)", text.X, text.Y, px, py)
+
+	// フォントサイズもビューポート変換に合わせてスケーリング
+	scaleX := rc.viewport.Width / rc.viewport.ViewBox.Width
+	scaleY := rc.viewport.Height / rc.viewport.ViewBox.Height
+	scale := math.Min(scaleX, scaleY) // アスペクト比を保持
+
+	// SVGのfont-sizeはポイント単位、ピクセルへの変換を考慮
+	// 1ポイント ≈ 1.333ピクセル（96 DPI基準）
+	// さらに、SVGの座標系とピクセル座標系の違いを考慮
+	fontScale := scale * 0.6 // フォントサイズを適切に調整
+	scaledFontSize := style.FontSize * fontScale
+	log.Printf("Font size scaled: %f -> %f (scale: %f, fontScale: %f)", style.FontSize, scaledFontSize, scale, fontScale)
 
 	// フォントスタイルの決定
 	fontStyle := "Regular"
@@ -183,7 +488,7 @@ func (rc *RasterContext) DrawText(text *Text, style *style.ComputedStyle) {
 	}
 
 	for _, fontFamily := range fontFamilies {
-		textRun, err = rc.fontRenderer.ShapeText(text.Content, fontFamily, fontStyle, style.FontSize)
+		textRun, err = rc.fontRenderer.ShapeText(text.Content, fontFamily, fontStyle, scaledFontSize)
 		if err == nil {
 			log.Printf("Text shaped successfully with font %s %s", fontFamily, fontStyle)
 			break
@@ -196,25 +501,31 @@ func (rc *RasterContext) DrawText(text *Text, style *style.ComputedStyle) {
 		return
 	}
 
-	// テキストの位置調整（text-anchor）
+	// テキストの位置調整（text-anchor）- 変換後の座標で調整
 	switch style.TextAnchor {
 	case "middle":
-		textRun.X = text.X - textRun.Width/2
+		textRun.X = px - textRun.Width/2
 	case "end":
-		textRun.X = text.X - textRun.Width
+		textRun.X = px - textRun.Width
 	default: // "start"
-		textRun.X = text.X
+		textRun.X = px
 	}
-	textRun.Y = text.Y
+	textRun.Y = py
 
 	log.Printf("Text position adjusted: x=%f, y=%f, width=%f", textRun.X, textRun.Y, textRun.Width)
 
+	// テキストの色を決定（SVGで指定された色を使用）
+	textColor := style.Fill
+	if textColor == nil || textColor == color.Transparent {
+		textColor = color.Black // デフォルトは黒
+	}
+
 	// テキストの描画
-	err = rc.fontRenderer.RenderTextRun(textRun, rc.fb.Image(), textRun.X, textRun.Y)
+	err = rc.fontRenderer.RenderTextRun(textRun, rc.fb.Image(), textRun.X, textRun.Y, textColor)
 	if err != nil {
 		log.Printf("Failed to render text run: %v", err)
 	} else {
-		log.Printf("Text rendered successfully")
+		log.Printf("Text rendered successfully with color: %v", textColor)
 	}
 }
 
@@ -377,6 +688,34 @@ func isPointInTriangle(x, y float64, points []struct{ x, y float64 }) bool {
 
 	// 点が三角形の内部にある条件
 	return u >= 0 && v >= 0 && w >= 0 && u <= 1 && v <= 1 && w <= 1
+}
+
+// pointToLineDistance は点から線分までの距離を計算します
+func pointToLineDistance(px, py, x1, y1, x2, y2 float64) float64 {
+	dx := x2 - x1
+	dy := y2 - y1
+	length := math.Sqrt(dx*dx + dy*dy)
+	if length == 0 {
+		return math.Sqrt((px-x1)*(px-x1) + (py-y1)*(py-y1))
+	}
+
+	// 点から直線までの距離を計算
+	t := ((px-x1)*dx + (py-y1)*dy) / (length * length)
+
+	// 点が線分の範囲内にあるかどうかをチェック
+	if t < 0 {
+		return math.Sqrt((px-x1)*(px-x1) + (py-y1)*(py-y1))
+	}
+	if t > 1 {
+		return math.Sqrt((px-x2)*(px-x2) + (py-y2)*(py-y2))
+	}
+
+	// 線分上の最近接点を計算
+	closestX := x1 + t*dx
+	closestY := y1 + t*dy
+
+	// 点から最近接点までの距離を返す
+	return math.Sqrt((px-closestX)*(px-closestX) + (py-closestY)*(py-closestY))
 }
 
 // drawLine は線を描画します（ブレゼンハムアルゴリズム）

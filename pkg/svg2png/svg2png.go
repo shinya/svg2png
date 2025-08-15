@@ -88,7 +88,7 @@ func RenderPNG(svg []byte, opts Options) (png []byte, diag Diagnostics, err erro
 	fontRenderer := globalFontManager.GetRenderer()
 
 	// レンダリングコンテキスト作成
-	rc := raster.NewRasterContext(fb, fontRenderer)
+	rc := raster.NewRasterContext(fb, fontRenderer, vp)
 
 	// 要素の描画
 	err = renderer.RenderElements(doc, vp, styleResolver, rc)
