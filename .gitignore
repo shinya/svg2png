@@ -1,0 +1,80 @@
+# Go specific
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+
+# Build and binary files
+/svgpng
+/build/
+/dist/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+
+# Test output files
+*_test.png
+*_test_output.png
+*_test_system_fonts.png
+*_test_corrected.png
+*_test_font_improved.png
+debug_*.png
+font_fallback_test.png
+simple_test.png
+text_test_output.png
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Font cache and temporary files
+font_cache/
+*.cache
+
+# Coverage reports
+coverage.out
+coverage.html
+
+# Dependency directories (if using vendoring)
+vendor/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Backup files
+*.bak
+*.backup
+*~
