@@ -1,6 +1,7 @@
 # SVG2PNG
 
-Pure Goで実装されたSVGからPNGへの変換ライブラリ。特にテキスト描画に特化し、システムフォントの自動検出と高品質なレンダリングを提供します。
+Pure Goで実装されたSVGからPNGへの変換ライブラリ。
+現在作成中。品質はまだまだ。
 
 ## 特徴
 
@@ -34,23 +35,23 @@ import (
 
 func main() {
     svgData := []byte(`<svg><text x="10" y="20">Hello World</text></svg>`)
-    
+
     opts := svg2png.Options{
         Width:  800,
         Height: 600,
         DPI:    96,
     }
-    
+
     pngData, diag, err := svg2png.RenderPNG(svgData, opts)
     if err != nil {
         panic(err)
     }
-    
+
     // 診断情報の確認
     for _, warning := range diag.Warnings {
         fmt.Println("Warning:", warning)
     }
-    
+
     // PNGデータの保存
     os.WriteFile("output.png", pngData, 0644)
 }
