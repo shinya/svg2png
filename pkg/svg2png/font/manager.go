@@ -214,7 +214,10 @@ func (m *Manager) scanDirectory(dir string) error {
 			Path:   path,
 		}
 
-		return m.RegisterFonts(font)
+		if err := m.RegisterFonts(font); err != nil {
+			log.Printf("Warning: skipping font %s: %v", path, err)
+		}
+		return nil // 個別フォントのエラーでスキャンを止めない
 	})
 }
 
@@ -266,19 +269,36 @@ func extractFontInfo(path string) (family, style string, err error) {
 	ext := filepath.Ext(filename)
 	name := strings.TrimSuffix(filename, ext)
 
-	// スタイルの推測
-	if strings.Contains(strings.ToLower(name), "bold") {
+	// スタイルの推測（Bold+Italicの組み合わせを先に確認）
+	nameLower := strings.ToLower(name)
+	isBold := strings.Contains(nameLower, "bold")
+	isItalic := strings.Contains(nameLower, "italic") || strings.Contains(nameLower, "oblique")
+
+	switch {
+	case isBold && isItalic:
+		style = "BoldItalic"
+	case isBold:
 		style = "Bold"
-	} else if strings.Contains(strings.ToLower(name), "italic") {
+	case isItalic:
 		style = "Italic"
-	} else {
+	default:
 		style = "Regular"
 	}
 
-	// ファミリ名の推測（簡易版）
-	family = strings.ReplaceAll(name, "Bold", "")
-	family = strings.ReplaceAll(family, "Italic", "")
+	// ファミリ名の推測（スタイル文字列を除去）
+	family = name
+	for _, suffix := range []string{"Bold Italic", "BoldItalic", "Bold", "Italic", "Oblique", "Regular"} {
+		// 大文字小文字を区別しない除去
+		idx := strings.Index(strings.ToLower(family), strings.ToLower(suffix))
+		if idx >= 0 {
+			family = family[:idx] + family[idx+len(suffix):]
+		}
+	}
 	family = strings.TrimSpace(family)
+	// 連続するスペースを1つに
+	for strings.Contains(family, "  ") {
+		family = strings.ReplaceAll(family, "  ", " ")
+	}
 
 	if family == "" {
 		family = "Unknown"

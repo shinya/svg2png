@@ -3,7 +3,7 @@ package parser
 import (
 	"encoding/xml"
 	"fmt"
-	"log"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -32,144 +32,119 @@ type ViewBox struct {
 
 // ParseSVG はSVGデータをパースします
 func ParseSVG(data []byte) (*Document, error) {
-	log.Printf("SVG parsing started, data length: %d bytes", len(data))
+	decoder := xml.NewDecoder(strings.NewReader(string(data)))
+	decoder.Strict = false
+	decoder.AutoClose = xml.HTMLAutoClose
 
-	var svg struct {
-		XMLName xml.Name `xml:"svg"`
-		ViewBox string   `xml:"viewBox,attr"`
-		Width   string   `xml:"width,attr"`
-		Height  string   `xml:"height,attr"`
-		Content []byte   `xml:",innerxml"`
-	}
+	// SVGルート要素を探す
+	for {
+		tok, err := decoder.Token()
+		if err == io.EOF {
+			return nil, fmt.Errorf("no SVG root element found")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse SVG: %w", err)
+		}
 
-	if err := xml.Unmarshal(data, &svg); err != nil {
-		return nil, fmt.Errorf("failed to parse SVG: %w", err)
-	}
+		if se, ok := tok.(xml.StartElement); ok {
+			if se.Name.Local == "svg" {
+				root, err := parseElement(decoder, se)
+				if err != nil {
+					return nil, fmt.Errorf("failed to parse SVG root: %w", err)
+				}
 
-	log.Printf("SVG root parsed: viewBox=%s, width=%s, height=%s, content length=%d",
-		svg.ViewBox, svg.Width, svg.Height, len(svg.Content))
+				doc := &Document{
+					Root:   root,
+					Width:  root.Attributes["width"],
+					Height: root.Attributes["height"],
+					DPI:    96,
+				}
 
-	// viewBoxの解析
-	var viewBox *ViewBox
-	if svg.ViewBox != "" {
-		if vb, err := parseViewBox(svg.ViewBox); err == nil {
-			viewBox = vb
-			log.Printf("ViewBox parsed: x=%f, y=%f, width=%f, height=%f",
-				vb.X, vb.Y, vb.Width, vb.Height)
+				if vbStr := root.Attributes["viewBox"]; vbStr != "" {
+					if vb, err := parseViewBox(vbStr); err == nil {
+						doc.ViewBox = vb
+					}
+				}
+
+				return doc, nil
+			}
 		}
 	}
+}
 
-	// ルート要素の作成
-	root := &Element{
-		Name:       "svg",
+// parseElement はXMLデコーダーから要素を再帰的にパースします
+func parseElement(decoder *xml.Decoder, start xml.StartElement) (*Element, error) {
+	elem := &Element{
+		Name:       start.Name.Local,
 		Attributes: make(map[string]string),
 	}
 
 	// 属性の解析
-	if svg.Width != "" {
-		root.Attributes["width"] = svg.Width
-	}
-	if svg.Height != "" {
-		root.Attributes["height"] = svg.Height
-	}
-	if svg.ViewBox != "" {
-		root.Attributes["viewBox"] = svg.ViewBox
+	for _, attr := range start.Attr {
+		// xmlns属性は無視
+		if attr.Name.Space == "xmlns" || attr.Name.Local == "xmlns" {
+			continue
+		}
+		elem.Attributes[attr.Name.Local] = attr.Value
 	}
 
-	// 子要素の解析
-	children, err := parseElements(svg.Content)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse child elements: %w", err)
-	}
-	root.Children = children
-
-	log.Printf("SVG parsing completed: %d child elements found", len(children))
-
-	return &Document{
-		Root:    root,
-		ViewBox: viewBox,
-		Width:   svg.Width,
-		Height:  svg.Height,
-		DPI:     96, // デフォルト値
-	}, nil
-}
-
-// parseElements はXMLコンテンツから要素を解析します
-func parseElements(content []byte) ([]*Element, error) {
-	var elements []*Element
-
-	log.Printf("Parsing child elements from content length: %d", len(content))
-
-	// 簡易的な要素解析（実際の実装ではより詳細な解析が必要）
-	// ここでは基本的な構造のみを実装
-	decoder := xml.NewDecoder(strings.NewReader(string(content)))
-
+	// 子要素・テキストの再帰解析
 	for {
-		token, err := decoder.Token()
+		tok, err := decoder.Token()
+		if err == io.EOF {
+			return elem, nil
+		}
 		if err != nil {
-			break
+			return nil, err
 		}
 
-		switch t := token.(type) {
+		switch t := tok.(type) {
 		case xml.StartElement:
-			elem := &Element{
-				Name:       t.Name.Local,
-				Attributes: make(map[string]string),
-				Children:   []*Element{},
+			child, err := parseElement(decoder, t)
+			if err != nil {
+				return nil, err
 			}
+			elem.Children = append(elem.Children, child)
 
-			// 属性の解析
-			for _, attr := range t.Attr {
-				elem.Attributes[attr.Name.Local] = attr.Value
-			}
-
-			log.Printf("Element found: %s with %d attributes", elem.Name, len(elem.Attributes))
-			elements = append(elements, elem)
 		case xml.CharData:
-			// テキストコンテンツの処理
 			text := strings.TrimSpace(string(t))
-			if text != "" && len(elements) > 0 {
-				elements[len(elements)-1].Text = text
-				log.Printf("Text content found: '%s'", text)
+			if text != "" {
+				elem.Text += text
 			}
+
+		case xml.EndElement:
+			return elem, nil
+
+		case xml.Comment:
+			// コメントは無視
+		case xml.ProcInst:
+			// 処理命令は無視
 		}
 	}
-
-	log.Printf("Child elements parsing completed: %d elements found", len(elements))
-	return elements, nil
 }
 
 // parseViewBox はviewBox属性を解析します
 func parseViewBox(viewBox string) (*ViewBox, error) {
+	// カンマまたはスペース区切りに対応
+	viewBox = strings.ReplaceAll(viewBox, ",", " ")
 	parts := strings.Fields(viewBox)
 	if len(parts) != 4 {
 		return nil, fmt.Errorf("invalid viewBox format: %s", viewBox)
 	}
 
-	x, err := strconv.ParseFloat(parts[0], 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid x value in viewBox: %w", err)
-	}
-
-	y, err := strconv.ParseFloat(parts[1], 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid y value in viewBox: %w", err)
-	}
-
-	width, err := strconv.ParseFloat(parts[2], 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid width value in viewBox: %w", err)
-	}
-
-	height, err := strconv.ParseFloat(parts[3], 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid height value in viewBox: %w", err)
+	vals := make([]float64, 4)
+	for i, p := range parts {
+		v, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid viewBox value %q: %w", p, err)
+		}
+		vals[i] = v
 	}
 
 	return &ViewBox{
-		X:      x,
-		Y:      y,
-		Width:  width,
-		Height: height,
+		X:      vals[0],
+		Y:      vals[1],
+		Width:  vals[2],
+		Height: vals[3],
 	}, nil
 }

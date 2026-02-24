@@ -99,7 +99,7 @@ func main() {
 
 // printUsage は使用方法を表示します
 func printUsage() {
-	fmt.Println(`SVG2PNG - SVGからPNGへの変換ツール
+	fmt.Print(`SVG2PNG - SVGからPNGへの変換ツール
 
 使用方法:
   svgpng -in <入力ファイル> -out <出力ファイル> [オプション]

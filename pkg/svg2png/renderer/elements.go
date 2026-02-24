@@ -3,6 +3,7 @@ package renderer
 import (
 	"log"
 	"strconv"
+	"strings"
 
 	"github.com/shinya/svg2png/pkg/svg2png/parser"
 	"github.com/shinya/svg2png/pkg/svg2png/raster"
@@ -12,119 +13,294 @@ import (
 
 // RenderElements はSVG要素を描画します
 func RenderElements(doc *parser.Document, vp *viewport.Viewport, resolver *style.StyleResolver, rc *raster.RasterContext) error {
-	log.Printf("Starting to render elements, document has %d root children", len(doc.Root.Children))
-	return renderElement(doc.Root, vp, resolver, rc)
+	return renderChildren(doc.Root.Children, vp, resolver, rc)
+}
+
+// renderChildren は子要素リストを描画します
+func renderChildren(children []*parser.Element, vp *viewport.Viewport, resolver *style.StyleResolver, rc *raster.RasterContext) error {
+	for _, child := range children {
+		if err := renderElement(child, vp, resolver, rc); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // renderElement は個別の要素を描画します
 func renderElement(elem *parser.Element, vp *viewport.Viewport, resolver *style.StyleResolver, rc *raster.RasterContext) error {
-	log.Printf("Rendering element: %s with %d children", elem.Name, len(elem.Children))
+	log.Printf("Rendering element: <%s>", elem.Name)
 
-	// スタイルの解決
-	style := resolver.Computed(elem)
-	log.Printf("Style computed for %s: font-family=%s, font-size=%f", elem.Name, style.FontFamily, style.FontSize)
-
-	// 要素の種類に応じた描画
 	switch elem.Name {
+	case "g", "svg":
+		// グループ要素: 子要素を再帰的に描画
+		// TODO: transform 属性のサポート
+		return renderChildren(elem.Children, vp, resolver, rc)
+
+	case "defs", "title", "desc", "metadata":
+		// 描画しない要素
+		return nil
+
+	case "use":
+		// TODO: use 要素のサポート
+		return nil
+
 	case "path":
-		log.Printf("Rendering path element")
-		return renderPath(elem, style, rc)
+		st := resolver.Computed(elem)
+		return renderPath(elem, st, rc)
+
 	case "rect":
-		log.Printf("Rendering rect element")
-		return renderRect(elem, style, rc)
+		st := resolver.Computed(elem)
+		return renderRect(elem, st, rc)
+
 	case "circle":
-		log.Printf("Rendering circle element")
-		return renderCircle(elem, style, rc)
+		st := resolver.Computed(elem)
+		return renderCircle(elem, st, rc)
+
+	case "ellipse":
+		st := resolver.Computed(elem)
+		return renderEllipse(elem, st, rc)
+
+	case "line":
+		st := resolver.Computed(elem)
+		return renderLine(elem, st, rc)
+
+	case "polyline":
+		st := resolver.Computed(elem)
+		return renderPolyline(elem, st, rc, false)
+
+	case "polygon":
+		st := resolver.Computed(elem)
+		return renderPolyline(elem, st, rc, true)
+
 	case "text":
-		log.Printf("Rendering text element: '%s'", elem.Text)
-		return renderText(elem, style, rc)
+		st := resolver.Computed(elem)
+		return renderText(elem, st, resolver, rc)
+
+	case "tspan":
+		// 単独で出現した場合はスキップ（通常は text 内から呼ばれる）
+		return nil
+
+	default:
+		// 未対応の要素は子要素を描画
+		return renderChildren(elem.Children, vp, resolver, rc)
+	}
+}
+
+// renderPath はパス要素を描画します
+func renderPath(elem *parser.Element, st *style.ComputedStyle, rc *raster.RasterContext) error {
+	d := elem.Attributes["d"]
+	if d == "" {
+		return nil
+	}
+	path := &raster.Path{Data: d}
+	rc.DrawPath(path, st)
+	return nil
+}
+
+// renderRect は矩形要素を描画します
+func renderRect(elem *parser.Element, st *style.ComputedStyle, rc *raster.RasterContext) error {
+	rect := &raster.Rect{}
+
+	if x, err := parseAttrFloat(elem, "x"); err == nil {
+		rect.X = x
+	}
+	if y, err := parseAttrFloat(elem, "y"); err == nil {
+		rect.Y = y
+	}
+	if w, err := parseAttrFloat(elem, "width"); err == nil {
+		rect.Width = w
+	}
+	if h, err := parseAttrFloat(elem, "height"); err == nil {
+		rect.Height = h
+	}
+	if rx, err := parseAttrFloat(elem, "rx"); err == nil {
+		rect.RX = rx
+	}
+	if ry, err := parseAttrFloat(elem, "ry"); err == nil {
+		rect.RY = ry
+	}
+	// rx/ry の相互フォールバック
+	if rect.RX > 0 && rect.RY == 0 {
+		rect.RY = rect.RX
+	}
+	if rect.RY > 0 && rect.RX == 0 {
+		rect.RX = rect.RY
 	}
 
-	// 子要素の再帰描画
+	rc.DrawRect(rect, st)
+	return nil
+}
+
+// renderCircle は円要素を描画します
+func renderCircle(elem *parser.Element, st *style.ComputedStyle, rc *raster.RasterContext) error {
+	circle := &raster.Circle{}
+
+	if cx, err := parseAttrFloat(elem, "cx"); err == nil {
+		circle.CX = cx
+	}
+	if cy, err := parseAttrFloat(elem, "cy"); err == nil {
+		circle.CY = cy
+	}
+	if r, err := parseAttrFloat(elem, "r"); err == nil {
+		circle.R = r
+	}
+
+	rc.DrawCircle(circle, st)
+	return nil
+}
+
+// renderEllipse は楕円要素を描画します
+func renderEllipse(elem *parser.Element, st *style.ComputedStyle, rc *raster.RasterContext) error {
+	ellipse := &raster.Ellipse{}
+
+	if cx, err := parseAttrFloat(elem, "cx"); err == nil {
+		ellipse.CX = cx
+	}
+	if cy, err := parseAttrFloat(elem, "cy"); err == nil {
+		ellipse.CY = cy
+	}
+	if rx, err := parseAttrFloat(elem, "rx"); err == nil {
+		ellipse.RX = rx
+	}
+	if ry, err := parseAttrFloat(elem, "ry"); err == nil {
+		ellipse.RY = ry
+	}
+
+	rc.DrawEllipse(ellipse, st)
+	return nil
+}
+
+// renderLine は線要素を描画します
+func renderLine(elem *parser.Element, st *style.ComputedStyle, rc *raster.RasterContext) error {
+	line := &raster.Line{}
+
+	if x1, err := parseAttrFloat(elem, "x1"); err == nil {
+		line.X1 = x1
+	}
+	if y1, err := parseAttrFloat(elem, "y1"); err == nil {
+		line.Y1 = y1
+	}
+	if x2, err := parseAttrFloat(elem, "x2"); err == nil {
+		line.X2 = x2
+	}
+	if y2, err := parseAttrFloat(elem, "y2"); err == nil {
+		line.Y2 = y2
+	}
+
+	rc.DrawLine(line, st)
+	return nil
+}
+
+// renderPolyline はpolyline/polygon要素を描画します
+func renderPolyline(elem *parser.Element, st *style.ComputedStyle, rc *raster.RasterContext, closed bool) error {
+	pointsStr := elem.Attributes["points"]
+	if pointsStr == "" {
+		return nil
+	}
+
+	points := parsePoints(pointsStr)
+	if len(points) == 0 {
+		return nil
+	}
+
+	rc.DrawPolyline(points, st, closed)
+	return nil
+}
+
+// renderText はテキスト要素を描画します
+func renderText(elem *parser.Element, st *style.ComputedStyle, resolver *style.StyleResolver, rc *raster.RasterContext) error {
+	// ベース位置を取得
+	var baseX, baseY float64
+	if x, err := parseAttrFloat(elem, "x"); err == nil {
+		baseX = x
+	}
+	if y, err := parseAttrFloat(elem, "y"); err == nil {
+		baseY = y
+	}
+
+	// 直接のテキストコンテンツを描画
+	if elem.Text != "" {
+		text := &raster.Text{
+			X:       baseX,
+			Y:       baseY,
+			Content: elem.Text,
+		}
+		rc.DrawText(text, st)
+	}
+
+	// tspan 子要素を描画
 	for _, child := range elem.Children {
-		if err := renderElement(child, vp, resolver, rc); err != nil {
-			return err
+		if child.Name != "tspan" {
+			continue
+		}
+
+		// 親スタイルを継承して子のスタイルを計算
+		childSt := resolver.ComputedFromParent(child, st)
+
+		x := baseX
+		y := baseY
+		if xStr, err := parseAttrFloat(child, "x"); err == nil {
+			x = xStr
+		}
+		if yStr, err := parseAttrFloat(child, "y"); err == nil {
+			y = yStr
+		}
+		// dx/dy 属性（相対オフセット）
+		if dx, err := parseAttrFloat(child, "dx"); err == nil {
+			x += dx
+		}
+		if dy, err := parseAttrFloat(child, "dy"); err == nil {
+			y += dy
+		}
+
+		content := child.Text
+		if content != "" {
+			text := &raster.Text{
+				X:       x,
+				Y:       y,
+				Content: content,
+			}
+			rc.DrawText(text, childSt)
 		}
 	}
 
 	return nil
 }
 
-// renderPath はパス要素を描画します
-func renderPath(elem *parser.Element, style *style.ComputedStyle, rc *raster.RasterContext) error {
-	// 簡易的な実装
-	// 実際の実装では、SVGパスの詳細な解析が必要
-	path := &raster.Path{
-		Data: elem.Attributes["d"],
-	}
+// ============================================================
+// ユーティリティ関数
+// ============================================================
 
-	log.Printf("Path data: %s", path.Data)
-	rc.DrawPath(path, style)
-	return nil
+// parseAttrFloat は属性値をfloat64に変換します（単位を除去）
+func parseAttrFloat(elem *parser.Element, attrName string) (float64, error) {
+	v, ok := elem.Attributes[attrName]
+	if !ok {
+		return 0, strconv.ErrSyntax
+	}
+	v = strings.TrimSpace(v)
+	// 単位を除去
+	for _, suffix := range []string{"px", "pt", "em", "rem"} {
+		if strings.HasSuffix(v, suffix) {
+			v = strings.TrimSuffix(v, suffix)
+			break
+		}
+	}
+	return strconv.ParseFloat(strings.TrimSpace(v), 64)
 }
 
-// renderRect は矩形要素を描画します
-func renderRect(elem *parser.Element, style *style.ComputedStyle, rc *raster.RasterContext) error {
-	rect := &raster.Rect{}
+// parsePoints はpoints属性を解析します（polyline/polygon用）
+func parsePoints(pointsStr string) []raster.Point {
+	// カンマとスペースで分割
+	pointsStr = strings.ReplaceAll(pointsStr, ",", " ")
+	parts := strings.Fields(pointsStr)
 
-	// 座標とサイズの解析
-	if x, err := strconv.ParseFloat(elem.Attributes["x"], 64); err == nil {
-		rect.X = x
+	var points []raster.Point
+	for i := 0; i+1 < len(parts); i += 2 {
+		x, err1 := strconv.ParseFloat(parts[i], 64)
+		y, err2 := strconv.ParseFloat(parts[i+1], 64)
+		if err1 == nil && err2 == nil {
+			points = append(points, raster.Point{X: x, Y: y})
+		}
 	}
-	if y, err := strconv.ParseFloat(elem.Attributes["y"], 64); err == nil {
-		rect.Y = y
-	}
-	if width, err := strconv.ParseFloat(elem.Attributes["width"], 64); err == nil {
-		rect.Width = width
-	}
-	if height, err := strconv.ParseFloat(elem.Attributes["height"], 64); err == nil {
-		rect.Height = height
-	}
-
-	log.Printf("Rect: x=%f, y=%f, width=%f, height=%f", rect.X, rect.Y, rect.Width, rect.Height)
-	rc.DrawRect(rect, style)
-	return nil
-}
-
-// renderCircle は円要素を描画します
-func renderCircle(elem *parser.Element, style *style.ComputedStyle, rc *raster.RasterContext) error {
-	circle := &raster.Circle{}
-
-	// 中心座標と半径の解析
-	if cx, err := strconv.ParseFloat(elem.Attributes["cx"], 64); err == nil {
-		circle.CX = cx
-	}
-	if cy, err := strconv.ParseFloat(elem.Attributes["cy"], 64); err == nil {
-		circle.CY = cy
-	}
-	if r, err := strconv.ParseFloat(elem.Attributes["r"], 64); err == nil {
-		circle.R = r
-	}
-
-	log.Printf("Circle: cx=%f, cy=%f, r=%f", circle.CX, circle.CY, circle.R)
-	rc.DrawCircle(circle, style)
-	return nil
-}
-
-// renderText はテキスト要素を描画します
-func renderText(elem *parser.Element, style *style.ComputedStyle, rc *raster.RasterContext) error {
-	text := &raster.Text{}
-
-	// 座標の解析
-	if x, err := strconv.ParseFloat(elem.Attributes["x"], 64); err == nil {
-		text.X = x
-	}
-	if y, err := strconv.ParseFloat(elem.Attributes["y"], 64); err == nil {
-		text.Y = y
-	}
-
-	// テキストコンテンツの取得
-	text.Content = elem.Text
-
-	log.Printf("Text: x=%f, y=%f, content='%s'", text.X, text.Y, text.Content)
-
-	// 簡易的なテキスト描画
-	// 実際の実装では、フォントレンダリングが必要
-	rc.DrawText(text, style)
-	return nil
+	return points
 }
