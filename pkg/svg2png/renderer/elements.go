@@ -33,7 +33,13 @@ func renderElement(elem *parser.Element, vp *viewport.Viewport, resolver *style.
 	switch elem.Name {
 	case "g", "svg":
 		// グループ要素: 子要素を再帰的に描画
-		// TODO: transform 属性のサポート
+		st := resolver.Computed(elem)
+		if st.ClipPathID != "" {
+			rc.PushClipPath(st.ClipPathID)
+			err := renderChildren(elem.Children, vp, resolver, rc)
+			rc.PopClipPath()
+			return err
+		}
 		return renderChildren(elem.Children, vp, resolver, rc)
 
 	case "defs", "title", "desc", "metadata":
@@ -218,7 +224,69 @@ func renderText(elem *parser.Element, st *style.ComputedStyle, resolver *style.S
 		baseY = y
 	}
 
-	// 直接のテキストコンテンツを描画
+	// tspan 子要素を持つかチェック
+	var tspanChildren []*parser.Element
+	for _, child := range elem.Children {
+		if child.Name == "tspan" && child.Text != "" {
+			// 絶対x位置を持たないtspan（フロー型）かチェック
+			if _, err := parseAttrFloat(child, "x"); err != nil {
+				tspanChildren = append(tspanChildren, child)
+			}
+		}
+	}
+
+	if len(tspanChildren) > 0 && elem.Text != "" {
+		// フロー型テキスト: text + tspan を結合してグループ描画
+		spans := make([]raster.TextSpan, 0)
+
+		// 親のテキスト（末尾にスペースを追加）
+		mainText := strings.TrimSpace(elem.Text)
+		if mainText != "" {
+			mainText += " "
+			spans = append(spans, raster.TextSpan{Content: mainText, Style: st})
+		}
+
+		for _, child := range tspanChildren {
+			childSt := resolver.ComputedFromParent(child, st)
+			text := strings.TrimSpace(child.Text)
+			if text != "" {
+				spans = append(spans, raster.TextSpan{Content: text, Style: childSt})
+			}
+		}
+
+		if len(spans) > 0 {
+			rc.DrawTextGroup(spans, baseX, baseY, st.TextAnchor)
+		}
+
+		// 絶対位置を持つ tspan は別途描画
+		for _, child := range elem.Children {
+			if child.Name != "tspan" || child.Text == "" {
+				continue
+			}
+			if _, err := parseAttrFloat(child, "x"); err == nil {
+				// 絶対x位置を持つtspan
+				childSt := resolver.ComputedFromParent(child, st)
+				x, y := baseX, baseY
+				if xv, err2 := parseAttrFloat(child, "x"); err2 == nil {
+					x = xv
+				}
+				if yv, err2 := parseAttrFloat(child, "y"); err2 == nil {
+					y = yv
+				}
+				if dx, err2 := parseAttrFloat(child, "dx"); err2 == nil {
+					x += dx
+				}
+				if dy, err2 := parseAttrFloat(child, "dy"); err2 == nil {
+					y += dy
+				}
+				text := &raster.Text{X: x, Y: y, Content: child.Text}
+				rc.DrawText(text, childSt)
+			}
+		}
+		return nil
+	}
+
+	// 単純な直接テキスト（tspan なし）
 	if elem.Text != "" {
 		text := &raster.Text{
 			X:       baseX,
@@ -228,7 +296,7 @@ func renderText(elem *parser.Element, st *style.ComputedStyle, resolver *style.S
 		rc.DrawText(text, st)
 	}
 
-	// tspan 子要素を描画
+	// tspan 子要素を個別に描画
 	for _, child := range elem.Children {
 		if child.Name != "tspan" {
 			continue

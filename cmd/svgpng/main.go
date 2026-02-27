@@ -14,14 +14,14 @@ import (
 func main() {
 	// コマンドラインオプションの定義
 	var (
-		inputFile      = flag.String("in", "", "入力SVGファイル")
-		outputFile     = flag.String("out", "", "出力PNGファイル")
-		width          = flag.Int("w", 800, "出力幅")
-		height         = flag.Int("h", 600, "出力高さ")
-		background     = flag.String("bg", "transparent", "背景色（transparent、#RRGGBB、色名）")
-		dpi            = flag.Float64("dpi", 96, "DPI")
-		systemFontScan = flag.Bool("system-font-scan", false, "システムフォントのスキャンを有効にする")
-		help           = flag.Bool("help", false, "ヘルプを表示")
+		inputFile             = flag.String("in", "", "入力SVGファイル")
+		outputFile            = flag.String("out", "", "出力PNGファイル")
+		width                 = flag.Int("w", 800, "出力幅")
+		height                = flag.Int("h", 600, "出力高さ")
+		background            = flag.String("bg", "transparent", "背景色（transparent、#RRGGBB、色名）")
+		dpi                   = flag.Float64("dpi", 96, "DPI")
+		noSystemFontScan      = flag.Bool("no-system-font-scan", false, "システムフォントのスキャンを無効にする")
+		help                  = flag.Bool("help", false, "ヘルプを表示")
 	)
 
 	flag.Parse()
@@ -54,11 +54,11 @@ func main() {
 
 	// レンダリングオプションの設定
 	opts := svg2png.Options{
-		Width:          *width,
-		Height:         *height,
-		DPI:            *dpi,
-		Background:     bgColor,
-		SystemFontScan: *systemFontScan,
+		Width:                 *width,
+		Height:                *height,
+		DPI:                   *dpi,
+		Background:            bgColor,
+		DisableSystemFontScan: *noSystemFontScan,
 	}
 
 	// SVGからPNGへの変換
@@ -118,8 +118,8 @@ func printUsage() {
         例: transparent, #ffffff, white, black
   -dpi float
         DPI（デフォルト: 96）
-  -system-font-scan
-        システムフォントのスキャンを有効にする
+  -no-system-font-scan
+        システムフォントのスキャンを無効にする（デフォルトはON）
   -help
         このヘルプを表示
 
@@ -127,7 +127,7 @@ func printUsage() {
   svgpng -in input.svg -out output.png -w 1024 -h 768
   svgpng -in input.svg -out output.png -w 800 -h 600 -bg white
   svgpng -in input.svg -out output.png -w 1920 -h 1080 -bg #000000
-  svgpng -in input.svg -out output.png -w 800 -h 600 -system-font-scan
+  svgpng -in input.svg -out output.png -w 800 -h 600 -no-system-font-scan
 `)
 }
 

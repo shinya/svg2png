@@ -12,9 +12,11 @@ import (
 type ComputedStyle struct {
 	Fill          color.Color
 	FillNone      bool // fill="none" が明示的に指定された
+	FillURL       string // fill="url(#id)" のid部分
 	FillOpacity   float64
 	Stroke        color.Color
 	StrokeNone    bool // stroke="none" が明示的に指定された
+	StrokeURL     string
 	StrokeWidth   float64
 	StrokeOpacity float64
 	Opacity       float64
@@ -23,6 +25,10 @@ type ComputedStyle struct {
 	FontStyle     string
 	FontWeight    string
 	TextAnchor    string
+	ClipPathID    string    // clip-path="url(#id)"
+	StrokeDasharray  []float64  // stroke-dasharray
+	StrokeDashoffset float64    // stroke-dashoffset
+	LetterSpacing    float64    // letter-spacing (px)
 }
 
 // StyleResolver はスタイルの解決を行います
@@ -109,10 +115,15 @@ func (r *StyleResolver) applyProperty(key, value string, style *ComputedStyle) {
 		if value == "none" {
 			style.Fill = color.Transparent
 			style.FillNone = true
+			style.FillURL = ""
+		} else if strings.HasPrefix(value, "url(") {
+			style.FillURL = extractURLID(value)
+			style.FillNone = false
 		} else {
 			if c, err := parseColor(value); err == nil {
 				style.Fill = c
 				style.FillNone = false
+				style.FillURL = ""
 			}
 		}
 	case "fill-opacity":
@@ -123,10 +134,15 @@ func (r *StyleResolver) applyProperty(key, value string, style *ComputedStyle) {
 		if value == "none" {
 			style.Stroke = color.Transparent
 			style.StrokeNone = true
+			style.StrokeURL = ""
+		} else if strings.HasPrefix(value, "url(") {
+			style.StrokeURL = extractURLID(value)
+			style.StrokeNone = false
 		} else {
 			if c, err := parseColor(value); err == nil {
 				style.Stroke = c
 				style.StrokeNone = false
+				style.StrokeURL = ""
 			}
 		}
 	case "stroke-width":
@@ -137,12 +153,26 @@ func (r *StyleResolver) applyProperty(key, value string, style *ComputedStyle) {
 		if opacity, err := strconv.ParseFloat(value, 64); err == nil {
 			style.StrokeOpacity = clamp01(opacity)
 		}
+	case "stroke-dasharray":
+		if value == "none" || value == "" {
+			style.StrokeDasharray = nil
+		} else {
+			style.StrokeDasharray = parseDasharray(value)
+		}
+	case "stroke-dashoffset":
+		if v, err := parseDimension(value); err == nil {
+			style.StrokeDashoffset = v
+		}
 	case "opacity":
 		if opacity, err := strconv.ParseFloat(value, 64); err == nil {
 			style.Opacity = clamp01(opacity)
 		}
+	case "clip-path":
+		style.ClipPathID = extractURLID(value)
 	case "font-family":
-		style.FontFamily = strings.Trim(value, `'"`)
+		// カンマ区切りの最初のフォントを使用
+		families := strings.Split(value, ",")
+		style.FontFamily = strings.Trim(strings.TrimSpace(families[0]), `'"`)
 	case "font-size":
 		if size, err := parseFontSize(value); err == nil {
 			style.FontSize = size
@@ -153,7 +183,45 @@ func (r *StyleResolver) applyProperty(key, value string, style *ComputedStyle) {
 		style.FontWeight = value
 	case "text-anchor":
 		style.TextAnchor = value
+	case "letter-spacing":
+		// "normal" は 0 として扱う
+		if value == "normal" {
+			style.LetterSpacing = 0
+		} else if v, err := parseDimension(value); err == nil {
+			style.LetterSpacing = v
+		}
 	}
+}
+
+// extractURLID は "url(#id)" から id 部分を取り出します
+func extractURLID(value string) string {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "url(") {
+		return ""
+	}
+	value = strings.TrimPrefix(value, "url(")
+	value = strings.TrimSuffix(value, ")")
+	value = strings.Trim(value, `"' `)
+	return strings.TrimPrefix(value, "#")
+}
+
+// parseDasharray は stroke-dasharray の値を解析します
+func parseDasharray(value string) []float64 {
+	value = strings.ReplaceAll(value, ",", " ")
+	parts := strings.Fields(value)
+	var dashes []float64
+	for _, p := range parts {
+		p = strings.TrimSuffix(strings.TrimSpace(p), "px")
+		if v, err := strconv.ParseFloat(p, 64); err == nil && v >= 0 {
+			dashes = append(dashes, v)
+		}
+	}
+	return dashes
+}
+
+// ParseColor は色文字列を解析します（外部パッケージから使用可能）
+func ParseColor(value string) (color.Color, error) {
+	return parseColor(value)
 }
 
 // parseFontSize はフォントサイズを解析します（単位付きも対応）

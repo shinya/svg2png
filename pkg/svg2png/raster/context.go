@@ -11,6 +11,7 @@ import (
 	"golang.org/x/image/vector"
 
 	"github.com/shinya/svg2png/pkg/svg2png/font"
+	"github.com/shinya/svg2png/pkg/svg2png/parser"
 	"github.com/shinya/svg2png/pkg/svg2png/style"
 	"github.com/shinya/svg2png/pkg/svg2png/viewport"
 )
@@ -20,14 +21,17 @@ type RasterContext struct {
 	fb           *FrameBuffer
 	fontRenderer *font.Renderer
 	viewport     *viewport.Viewport
+	defs         *parser.Defs
+	clipMask     *image.Alpha
 }
 
 // NewRasterContext は新しいラスタリングコンテキストを作成します
-func NewRasterContext(fb *FrameBuffer, fontRenderer *font.Renderer, vp *viewport.Viewport) *RasterContext {
+func NewRasterContext(fb *FrameBuffer, fontRenderer *font.Renderer, vp *viewport.Viewport, defs *parser.Defs) *RasterContext {
 	return &RasterContext{
 		fb:           fb,
 		fontRenderer: fontRenderer,
 		viewport:     vp,
+		defs:         defs,
 	}
 }
 
@@ -59,6 +63,222 @@ func (rc *RasterContext) scaleLenY(v float64) float64 {
 	return v * scaleY
 }
 
+// fontScale はフォントスケールを返します（X/Y 平均）
+func (rc *RasterContext) fontScale() float64 {
+	scaleX, scaleY, _, _ := rc.scales()
+	return (scaleX + scaleY) / 2.0
+}
+
+// scaledFontSizePt はOpenType points 単位のフォントサイズを返します
+func (rc *RasterContext) scaledFontSizePt(st *style.ComputedStyle) float64 {
+	dpi := rc.viewport.DPI
+	if dpi == 0 {
+		dpi = 96
+	}
+	return st.FontSize * rc.fontScale() * 72.0 / dpi
+}
+
+// fontStyleStr はComputedStyle からフォントスタイル文字列を返します
+func (rc *RasterContext) fontStyleStr(st *style.ComputedStyle) string {
+	fs := "Regular"
+	if st.FontStyle == "italic" || st.FontStyle == "oblique" {
+		fs = "Italic"
+	}
+	if st.FontWeight == "bold" || st.FontWeight == "700" || st.FontWeight == "800" || st.FontWeight == "900" {
+		if fs == "Italic" {
+			fs = "BoldItalic"
+		} else {
+			fs = "Bold"
+		}
+	}
+	return fs
+}
+
+// fontFamilies はフォントファミリリストを返します（フォールバック含む）
+func (rc *RasterContext) fontFamilies(st *style.ComputedStyle) []string {
+	families := []string{st.FontFamily}
+	switch strings.ToLower(st.FontFamily) {
+	case "sans-serif", "helvetica", "arial":
+		families = append(families, "Helvetica", "Arial", "Geneva", "FreeSans")
+	case "serif", "times", "times new roman":
+		families = append(families, "Times", "Times New Roman", "FreeSerif")
+	case "monospace", "courier", "courier new":
+		families = append(families, "Courier", "Courier New", "FreeMono")
+	}
+	return families
+}
+
+// measureTextPix はテキストのピクセル幅を返します（letter-spacing 込み）
+func (rc *RasterContext) measureTextPix(content string, st *style.ComputedStyle) float64 {
+	if rc.fontRenderer == nil || content == "" {
+		return 0
+	}
+	scaledFontSize := rc.scaledFontSizePt(st)
+	fontStyle := rc.fontStyleStr(st)
+	families := rc.fontFamilies(st)
+
+	for _, family := range families {
+		if w, err := rc.fontRenderer.MeasureText(content, family, fontStyle, scaledFontSize); err == nil {
+			nChars := float64(len([]rune(content)))
+			w += st.LetterSpacing * rc.fontScale() * nChars
+			return w
+		}
+	}
+	return float64(len([]rune(content))) * scaledFontSize * 0.6
+}
+
+// drawTextRaw はテキストをピクセル位置に直接描画します（text-anchor 処理なし）
+func (rc *RasterContext) drawTextRaw(content string, pixX, pixY float64, st *style.ComputedStyle) {
+	if rc.fontRenderer == nil || content == "" {
+		return
+	}
+	if st.FillNone {
+		return
+	}
+	textColor := st.Fill
+
+	scaledFontSize := rc.scaledFontSizePt(st)
+	fontStyle := rc.fontStyleStr(st)
+	families := rc.fontFamilies(st)
+
+	// letter-spacing が指定されている場合は文字ごとに描画
+	if st.LetterSpacing != 0 {
+		rc.drawTextWithLetterSpacing(content, pixX, pixY, st, scaledFontSize, fontStyle, families, textColor)
+		return
+	}
+
+	for _, family := range families {
+		if err := rc.fontRenderer.RenderText(content, family, fontStyle, scaledFontSize, rc.fb.Image(), pixX, pixY, textColor); err == nil {
+			return
+		}
+	}
+	// フォールバック
+	_ = rc.fontRenderer.RenderText(content, "", fontStyle, scaledFontSize, rc.fb.Image(), pixX, pixY, textColor)
+}
+
+// drawTextWithLetterSpacing は letter-spacing を考慮して1文字ずつ描画します
+func (rc *RasterContext) drawTextWithLetterSpacing(content string, x, y float64, st *style.ComputedStyle, scaledFontSize float64, fontStyle string, families []string, textColor color.Color) {
+	// 使用するフォントを決定
+	usedFamily := ""
+	for _, family := range families {
+		if rc.fontRenderer.FindFont(family, fontStyle) != nil {
+			usedFamily = family
+			break
+		}
+	}
+
+	letterSpacingPix := st.LetterSpacing * rc.fontScale()
+	curX := x
+	for _, r := range content {
+		ch := string(r)
+		_ = rc.fontRenderer.RenderText(ch, usedFamily, fontStyle, scaledFontSize, rc.fb.Image(), curX, y, textColor)
+		// 文字幅を計測して進める
+		advance := float64(len([]rune(ch))) * scaledFontSize * 0.6 // フォールバック幅
+		if w, err := rc.fontRenderer.MeasureText(ch, usedFamily, fontStyle, scaledFontSize); err == nil {
+			advance = w
+		}
+		curX += advance + letterSpacingPix
+	}
+}
+
+// ============================================================
+// クリップパス
+// ============================================================
+
+// PushClipPath は指定IDのclipPathをアクティブにします
+func (rc *RasterContext) PushClipPath(clipPathID string) {
+	if rc.defs == nil {
+		return
+	}
+	clipElem, ok := rc.defs.ClipPaths[clipPathID]
+	if !ok {
+		log.Printf("clipPath not found: %s", clipPathID)
+		return
+	}
+
+	w, h := rc.fb.Bounds().Dx(), rc.fb.Bounds().Dy()
+	mask := image.NewAlpha(image.Rect(0, 0, w, h))
+
+	for _, child := range clipElem.Children {
+		rz := vector.NewRasterizer(w, h)
+		built := false
+
+		switch child.Name {
+		case "polygon", "polyline":
+			pts := parsePointsStrLocal(child.Attributes["points"])
+			if len(pts) > 0 {
+				x0, y0 := rc.toPixelXY(pts[0][0], pts[0][1])
+				rz.MoveTo(x0, y0)
+				for _, pt := range pts[1:] {
+					px, py := rc.toPixelXY(pt[0], pt[1])
+					rz.LineTo(px, py)
+				}
+				rz.ClosePath()
+				built = true
+			}
+		case "rect":
+			rx := parseAttrF(child, "x")
+			ry := parseAttrF(child, "y")
+			rw := parseAttrF(child, "width")
+			rh := parseAttrF(child, "height")
+			if rw > 0 && rh > 0 {
+				x1, y1 := rc.toPixelXY(rx, ry)
+				x2, y2 := rc.toPixelXY(rx+rw, ry+rh)
+				addRoundedRect(rz, x1, y1, x2, y2, 0, 0)
+				built = true
+			}
+		case "circle":
+			cx := parseAttrF(child, "cx")
+			cy := parseAttrF(child, "cy")
+			r := parseAttrF(child, "r")
+			if r > 0 {
+				pcx, pcy := rc.toPixelXY(cx, cy)
+				prx := float32(rc.scaleLenX(r))
+				pry := float32(rc.scaleLenY(r))
+				addEllipse(rz, pcx, pcy, prx, pry)
+				built = true
+			}
+		case "path":
+			d := child.Attributes["d"]
+			if d != "" {
+				toPixel := func(x, y float64) (float32, float32) { return rc.toPixelXY(x, y) }
+				if err := buildPathRasterizer(rz, d, toPixel); err == nil {
+					built = true
+				}
+			}
+		}
+
+		if built {
+			rz.Draw(mask, mask.Bounds(), image.Opaque, image.Point{})
+		}
+	}
+
+	rc.clipMask = mask
+}
+
+// PopClipPath はアクティブなclipPathを解除します
+func (rc *RasterContext) PopClipPath() {
+	rc.clipMask = nil
+}
+
+// applyClipToAlpha はalphaマスクにclipMaskを適用します
+func (rc *RasterContext) applyClipToAlpha(alpha *image.Alpha) {
+	if rc.clipMask == nil {
+		return
+	}
+	bounds := alpha.Bounds()
+	for py := bounds.Min.Y; py < bounds.Max.Y; py++ {
+		for px := bounds.Min.X; px < bounds.Max.X; px++ {
+			a := alpha.AlphaAt(px, py).A
+			if a == 0 {
+				continue
+			}
+			c := rc.clipMask.AlphaAt(px, py).A
+			alpha.SetAlpha(px, py, color.Alpha{A: uint8(uint16(a) * uint16(c) / 255)})
+		}
+	}
+}
+
 // compositeAlpha はアルファマスクを使って色をフレームバッファに合成します
 func (rc *RasterContext) compositeAlpha(alpha *image.Alpha, col color.Color, opacity float64) {
 	r16, g16, b16, _ := col.RGBA()
@@ -74,6 +294,15 @@ func (rc *RasterContext) compositeAlpha(alpha *image.Alpha, col color.Color, opa
 			mask := alpha.AlphaAt(px, py).A
 			if mask == 0 {
 				continue
+			}
+
+			// clipMask との AND
+			if rc.clipMask != nil {
+				cm := rc.clipMask.AlphaAt(px, py).A
+				if cm == 0 {
+					continue
+				}
+				mask = uint8(uint16(mask) * uint16(cm) / 255)
 			}
 
 			a := float64(mask) / 255.0 * opacity
@@ -100,6 +329,20 @@ func (rc *RasterContext) rasterizeAndComposite(rz *vector.Rasterizer, col color.
 	rc.compositeAlpha(alpha, col, opacity)
 }
 
+// drawURLFill はFillURL に対応するグラデーション/パターン塗りを行います
+func (rc *RasterContext) drawURLFill(alpha *image.Alpha, fillURL string, bounds image.Rectangle, opacity float64) {
+	if rc.defs == nil {
+		return
+	}
+	if lg, ok := rc.defs.LinearGradients[fillURL]; ok {
+		rc.DrawLinearGradient(alpha, lg, bounds, opacity)
+	} else if rg, ok := rc.defs.RadialGradients[fillURL]; ok {
+		rc.DrawRadialGradient(alpha, rg, bounds, opacity)
+	} else if pe, ok := rc.defs.Patterns[fillURL]; ok {
+		rc.DrawPatternFill(alpha, pe, bounds, opacity, rc.defs)
+	}
+}
+
 // ============================================================
 // DrawRect
 // ============================================================
@@ -117,7 +360,15 @@ func (rc *RasterContext) DrawRect(rect *Rect, st *style.ComputedStyle) {
 	w, h := rc.fb.Bounds().Dx(), rc.fb.Bounds().Dy()
 
 	// Fill
-	if !st.FillNone {
+	if st.FillURL != "" {
+		rz := vector.NewRasterizer(w, h)
+		addRoundedRect(rz, x1, y1, x2, y2, rx, ry)
+		alpha := image.NewAlpha(image.Rect(0, 0, w, h))
+		rz.Draw(alpha, alpha.Bounds(), image.Opaque, image.Point{})
+		rc.applyClipToAlpha(alpha)
+		bounds := image.Rect(int(x1), int(y1), int(x2), int(y2))
+		rc.drawURLFill(alpha, st.FillURL, bounds, st.FillOpacity*st.Opacity)
+	} else if !st.FillNone {
 		_, _, _, fa := st.Fill.RGBA()
 		if fa > 0 {
 			rz := vector.NewRasterizer(w, h)
@@ -219,7 +470,15 @@ func (rc *RasterContext) DrawEllipse(ellipse *Ellipse, st *style.ComputedStyle) 
 	w, h := rc.fb.Bounds().Dx(), rc.fb.Bounds().Dy()
 
 	// Fill
-	if !st.FillNone {
+	if st.FillURL != "" {
+		rz := vector.NewRasterizer(w, h)
+		addEllipse(rz, cx, cy, rx, ry)
+		alpha := image.NewAlpha(image.Rect(0, 0, w, h))
+		rz.Draw(alpha, alpha.Bounds(), image.Opaque, image.Point{})
+		rc.applyClipToAlpha(alpha)
+		bounds := image.Rect(int(cx-rx), int(cy-ry), int(cx+rx), int(cy+ry))
+		rc.drawURLFill(alpha, st.FillURL, bounds, st.FillOpacity*st.Opacity)
+	} else if !st.FillNone {
 		_, _, _, fa := st.Fill.RGBA()
 		if fa > 0 {
 			rz := vector.NewRasterizer(w, h)
@@ -234,16 +493,41 @@ func (rc *RasterContext) DrawEllipse(ellipse *Ellipse, st *style.ComputedStyle) 
 		if sa > 0 {
 			sw := float32(rc.scaleLenX(st.StrokeWidth))
 			half := sw / 2
-			rz := vector.NewRasterizer(w, h)
-			// 外側楕円
-			addEllipse(rz, cx, cy, rx+half, ry+half)
-			// 内側楕円（反転でくり抜き）
-			if rx > half && ry > half {
-				addEllipseCCW(rz, cx, cy, rx-half, ry-half)
+			if len(st.StrokeDasharray) > 0 {
+				rc.strokeEllipseWithDash(cx, cy, rx, ry, sw, st.StrokeDasharray, st.Stroke, st.StrokeOpacity*st.Opacity)
+			} else {
+				rz := vector.NewRasterizer(w, h)
+				// 外側楕円
+				addEllipse(rz, cx, cy, rx+half, ry+half)
+				// 内側楕円（反転でくり抜き）
+				if rx > half && ry > half {
+					addEllipseCCW(rz, cx, cy, rx-half, ry-half)
+				}
+				rc.rasterizeAndComposite(rz, st.Stroke, st.StrokeOpacity*st.Opacity)
 			}
-			rc.rasterizeAndComposite(rz, st.Stroke, st.StrokeOpacity*st.Opacity)
 		}
 	}
+}
+
+// strokeEllipseWithDash は破線で楕円ストロークを描画します
+func (rc *RasterContext) strokeEllipseWithDash(cx, cy, rx, ry, sw float32, dasharray []float64, col color.Color, opacity float64) {
+	// 楕円をN点でサンプリングしてポリラインに変換
+	N := 360
+	pts := make([][2]float32, N+1)
+	for i := 0; i <= N; i++ {
+		angle := float64(i) / float64(N) * 2 * math.Pi
+		pts[i][0] = cx + rx*float32(math.Cos(angle))
+		pts[i][1] = cy + ry*float32(math.Sin(angle))
+	}
+
+	w, h := rc.fb.Bounds().Dx(), rc.fb.Bounds().Dy()
+	rz := vector.NewRasterizer(w, h)
+	dashPixels := make([]float64, len(dasharray))
+	for i, d := range dasharray {
+		dashPixels[i] = d * rc.fontScale() // SVG→ピクセル
+	}
+	strokeSegmentsWithDash(rz, pts, sw, dashPixels)
+	rc.rasterizeAndComposite(rz, col, opacity)
 }
 
 // addEllipse はラスタライザーに楕円パスを追加します（時計回り）
@@ -288,7 +572,13 @@ func (rc *RasterContext) DrawLine(line *Line, st *style.ComputedStyle) {
 
 	w, h := rc.fb.Bounds().Dx(), rc.fb.Bounds().Dy()
 	rz := vector.NewRasterizer(w, h)
-	addThickLine(rz, x1, y1, x2, y2, sw)
+
+	if len(st.StrokeDasharray) > 0 {
+		dashPixels := scaleDasharray(st.StrokeDasharray, rc.fontScale())
+		dashThickLine(rz, x1, y1, x2, y2, sw, dashPixels)
+	} else {
+		addThickLine(rz, x1, y1, x2, y2, sw)
+	}
 	rc.rasterizeAndComposite(rz, st.Stroke, st.StrokeOpacity*st.Opacity)
 }
 
@@ -309,6 +599,89 @@ func addThickLine(rz *vector.Rasterizer, x1, y1, x2, y2, width float32) {
 	rz.LineTo(x2-nx, y2-ny)
 	rz.LineTo(x1-nx, y1-ny)
 	rz.ClosePath()
+}
+
+// scaleDasharray は SVG単位の dasharray をピクセル単位に変換します
+func scaleDasharray(dasharray []float64, scale float64) []float64 {
+	result := make([]float64, len(dasharray))
+	for i, d := range dasharray {
+		result[i] = d * scale
+	}
+	return result
+}
+
+// dashThickLine は破線の太い線をラスタライザーに追加します
+func dashThickLine(rz *vector.Rasterizer, x1, y1, x2, y2, width float32, dashPx []float64) {
+	dx := x2 - x1
+	dy := y2 - y1
+	totalLen := float64(math.Sqrt(float64(dx*dx + dy*dy)))
+	if totalLen == 0 {
+		return
+	}
+	ux := float64(dx) / totalLen
+	uy := float64(dy) / totalLen
+
+	pos := 0.0
+	dashIdx := 0
+	drawing := true
+
+	for pos < totalLen {
+		dashLen := dashPx[dashIdx%len(dashPx)]
+		endPos := pos + dashLen
+		if endPos > totalLen {
+			endPos = totalLen
+		}
+		if drawing {
+			sx := float32(float64(x1) + ux*pos)
+			sy := float32(float64(y1) + uy*pos)
+			ex := float32(float64(x1) + ux*endPos)
+			ey := float32(float64(y1) + uy*endPos)
+			addThickLine(rz, sx, sy, ex, ey, width)
+		}
+		pos = endPos
+		dashIdx++
+		drawing = !drawing
+	}
+}
+
+// strokeSegmentsWithDash はピクセル座標セグメントに dasharray を適用します
+func strokeSegmentsWithDash(rz *vector.Rasterizer, pts [][2]float32, sw float32, dashPx []float64) {
+	if len(pts) < 2 {
+		return
+	}
+	dashIdx := 0
+	dashPos := 0.0
+	drawing := true
+
+	for i := 0; i < len(pts)-1; i++ {
+		x1, y1 := pts[i][0], pts[i][1]
+		x2, y2 := pts[i+1][0], pts[i+1][1]
+		dx, dy := x2-x1, y2-y1
+		segLen := float64(math.Sqrt(float64(dx*dx + dy*dy)))
+		if segLen == 0 {
+			continue
+		}
+		ux, uy := float64(dx)/segLen, float64(dy)/segLen
+		pos := 0.0
+		for pos < segLen {
+			remaining := dashPx[dashIdx%len(dashPx)] - dashPos
+			advance := math.Min(remaining, segLen-pos)
+			if drawing {
+				sx := float32(float64(x1) + ux*pos)
+				sy := float32(float64(y1) + uy*pos)
+				ex := float32(float64(x1) + ux*(pos+advance))
+				ey := float32(float64(y1) + uy*(pos+advance))
+				addThickLine(rz, sx, sy, ex, ey, sw)
+			}
+			pos += advance
+			dashPos += advance
+			if dashPos >= dashPx[dashIdx%len(dashPx)] {
+				dashPos = 0
+				dashIdx++
+				drawing = !drawing
+			}
+		}
+	}
 }
 
 // ============================================================
@@ -344,18 +717,33 @@ func (rc *RasterContext) DrawPolyline(points []Point, st *style.ComputedStyle, c
 		_, _, _, sa := st.Stroke.RGBA()
 		if sa > 0 {
 			sw := float32(rc.scaleLenX(st.StrokeWidth))
-			rz := vector.NewRasterizer(w, h)
-			for i := 0; i < len(points)-1; i++ {
-				x1, y1 := rc.toPixelXY(points[i].X, points[i].Y)
-				x2, y2 := rc.toPixelXY(points[i+1].X, points[i+1].Y)
-				addThickLine(rz, x1, y1, x2, y2, sw)
+			if len(st.StrokeDasharray) > 0 {
+				// 破線ストローク
+				dashPixels := scaleDasharray(st.StrokeDasharray, rc.fontScale())
+				pts := make([][2]float32, len(points))
+				for i, p := range points {
+					pts[i][0], pts[i][1] = rc.toPixelXY(p.X, p.Y)
+				}
+				if closed {
+					pts = append(pts, pts[0])
+				}
+				rz := vector.NewRasterizer(w, h)
+				strokeSegmentsWithDash(rz, pts, sw, dashPixels)
+				rc.rasterizeAndComposite(rz, st.Stroke, st.StrokeOpacity*st.Opacity)
+			} else {
+				rz := vector.NewRasterizer(w, h)
+				for i := 0; i < len(points)-1; i++ {
+					x1, y1 := rc.toPixelXY(points[i].X, points[i].Y)
+					x2, y2 := rc.toPixelXY(points[i+1].X, points[i+1].Y)
+					addThickLine(rz, x1, y1, x2, y2, sw)
+				}
+				if closed {
+					x1, y1 := rc.toPixelXY(points[len(points)-1].X, points[len(points)-1].Y)
+					x2, y2 := rc.toPixelXY(points[0].X, points[0].Y)
+					addThickLine(rz, x1, y1, x2, y2, sw)
+				}
+				rc.rasterizeAndComposite(rz, st.Stroke, st.StrokeOpacity*st.Opacity)
 			}
-			if closed {
-				x1, y1 := rc.toPixelXY(points[len(points)-1].X, points[len(points)-1].Y)
-				x2, y2 := rc.toPixelXY(points[0].X, points[0].Y)
-				addThickLine(rz, x1, y1, x2, y2, sw)
-			}
-			rc.rasterizeAndComposite(rz, st.Stroke, st.StrokeOpacity*st.Opacity)
 		}
 	}
 }
@@ -380,7 +768,17 @@ func (rc *RasterContext) DrawPath(path *Path, st *style.ComputedStyle) {
 	scaleLX := func(v float64) float64 { return v * scaleX }
 
 	// Fill
-	if !st.FillNone {
+	if st.FillURL != "" {
+		rz := vector.NewRasterizer(w, h)
+		if err := buildPathRasterizer(rz, path.Data, toPixel); err == nil {
+			alpha := image.NewAlpha(image.Rect(0, 0, w, h))
+			rz.Draw(alpha, alpha.Bounds(), image.Opaque, image.Point{})
+			rc.applyClipToAlpha(alpha)
+			// パスのboundsは全キャンバスを使用（大抵の場合は問題ない）
+			bounds := rc.fb.Bounds()
+			rc.drawURLFill(alpha, st.FillURL, bounds, st.FillOpacity*st.Opacity)
+		}
+	} else if !st.FillNone {
 		_, _, _, fa := st.Fill.RGBA()
 		if fa > 0 {
 			rz := vector.NewRasterizer(w, h)
@@ -397,11 +795,131 @@ func (rc *RasterContext) DrawPath(path *Path, st *style.ComputedStyle) {
 		_, _, _, sa := st.Stroke.RGBA()
 		if sa > 0 {
 			sw := float32(scaleLX(st.StrokeWidth))
-			rz := vector.NewRasterizer(w, h)
-			if err := buildStrokeRasterizer(rz, path.Data, sw, toPixel); err != nil {
-				log.Printf("DrawPath stroke error: %v", err)
-			} else {
+			if len(st.StrokeDasharray) > 0 {
+				// パスを線分に分解してdashで描く
+				dashPixels := scaleDasharray(st.StrokeDasharray, rc.fontScale())
+				rz := vector.NewRasterizer(w, h)
+				buildDashStrokeFromPath(rz, path.Data, sw, toPixel, dashPixels)
 				rc.rasterizeAndComposite(rz, st.Stroke, st.StrokeOpacity*st.Opacity)
+			} else {
+				rz := vector.NewRasterizer(w, h)
+				if err := buildStrokeRasterizer(rz, path.Data, sw, toPixel); err != nil {
+					log.Printf("DrawPath stroke error: %v", err)
+				} else {
+					rc.rasterizeAndComposite(rz, st.Stroke, st.StrokeOpacity*st.Opacity)
+				}
+			}
+		}
+	}
+}
+
+// buildDashStrokeFromPath はパスの各セグメントを破線ストロークでレンダリングします
+func buildDashStrokeFromPath(rz *vector.Rasterizer, data string, sw float32, toPixel func(float64, float64) (float32, float32), dashPx []float64) {
+	// パスを線分に展開してからdashを適用する
+	type seg struct{ x1, y1, x2, y2 float32 }
+	var segs []seg
+
+	var curX, curY, startX, startY float64
+	pr := &pathReader{s: data}
+	var lastCmd byte
+
+	for !pr.done() {
+		pr.skipWS()
+		if pr.done() {
+			break
+		}
+		c := pr.s[pr.pos]
+		if isPathCmd(c) {
+			lastCmd = c
+			pr.pos++
+		}
+
+		prevX, prevY := curX, curY
+
+		switch lastCmd {
+		case 'M':
+			x, ok1 := pr.readFloat()
+			y, ok2 := pr.readFloat()
+			if !ok1 || !ok2 {
+				goto nextCmd2
+			}
+			curX, curY = x, y
+			startX, startY = x, y
+			lastCmd = 'L'
+		case 'm':
+			dx, ok1 := pr.readFloat()
+			dy, ok2 := pr.readFloat()
+			if !ok1 || !ok2 {
+				goto nextCmd2
+			}
+			curX += dx
+			curY += dy
+			startX, startY = curX, curY
+			lastCmd = 'l'
+		case 'L':
+			x, ok1 := pr.readFloat()
+			y, ok2 := pr.readFloat()
+			if !ok1 || !ok2 {
+				goto nextCmd2
+			}
+			px1, py1 := toPixel(prevX, prevY)
+			px2, py2 := toPixel(x, y)
+			segs = append(segs, seg{px1, py1, px2, py2})
+			curX, curY = x, y
+		case 'l':
+			dx, ok1 := pr.readFloat()
+			dy, ok2 := pr.readFloat()
+			if !ok1 || !ok2 {
+				goto nextCmd2
+			}
+			nx, ny := curX+dx, curY+dy
+			px1, py1 := toPixel(curX, curY)
+			px2, py2 := toPixel(nx, ny)
+			segs = append(segs, seg{px1, py1, px2, py2})
+			curX, curY = nx, ny
+		case 'Z', 'z':
+			px1, py1 := toPixel(curX, curY)
+			px2, py2 := toPixel(startX, startY)
+			segs = append(segs, seg{px1, py1, px2, py2})
+			curX, curY = startX, startY
+		default:
+			for pr.isNextFloat() {
+				pr.readFloat()
+			}
+		}
+		continue
+	nextCmd2:
+		_ = prevX
+		_ = prevY
+	}
+
+	dashIdx := 0
+	dashPos := 0.0
+	drawing := true
+	for _, s := range segs {
+		dx, dy := s.x2-s.x1, s.y2-s.y1
+		segLen := float64(math.Sqrt(float64(dx*dx + dy*dy)))
+		if segLen == 0 {
+			continue
+		}
+		ux, uy := float64(dx)/segLen, float64(dy)/segLen
+		pos := 0.0
+		for pos < segLen {
+			remaining := dashPx[dashIdx%len(dashPx)] - dashPos
+			advance := math.Min(remaining, segLen-pos)
+			if drawing {
+				sx := float32(float64(s.x1) + ux*pos)
+				sy := float32(float64(s.y1) + uy*pos)
+				ex := float32(float64(s.x1) + ux*(pos+advance))
+				ey := float32(float64(s.y1) + uy*(pos+advance))
+				addThickLine(rz, sx, sy, ex, ey, sw)
+			}
+			pos += advance
+			dashPos += advance
+			if dashPos >= dashPx[dashIdx%len(dashPx)] {
+				dashPos = 0
+				dashIdx++
+				drawing = !drawing
 			}
 		}
 	}
@@ -1042,6 +1560,54 @@ func arcToBezier(rz *vector.Rasterizer, x1, y1, rx, ry, phi float64, largeArc, s
 // DrawText
 // ============================================================
 
+// TextSpan はテキストスパン（テキスト＋スタイル）を表します
+type TextSpan struct {
+	Content string
+	Style   *style.ComputedStyle
+}
+
+// DrawTextGroup は複数スパンをグループとして描画します（text-anchor対応）
+func (rc *RasterContext) DrawTextGroup(spans []TextSpan, anchorX, anchorY float64, textAnchor string) {
+	if len(spans) == 0 || rc.fontRenderer == nil {
+		return
+	}
+
+	_, py := rc.toPixelXY(anchorX, anchorY)
+	px, _ := rc.toPixelXY(anchorX, anchorY)
+
+	// 各スパンの幅を計測
+	widths := make([]float64, len(spans))
+	totalWidth := 0.0
+	for i, s := range spans {
+		if s.Style.FillNone {
+			continue
+		}
+		w := rc.measureTextPix(s.Content, s.Style)
+		widths[i] = w
+		totalWidth += w
+	}
+
+	// text-anchor に基づいて開始x を決定
+	startX := float64(px)
+	switch textAnchor {
+	case "middle":
+		startX -= totalWidth / 2
+	case "end":
+		startX -= totalWidth
+	}
+
+	// スパンを順に描画
+	curX := startX
+	for i, s := range spans {
+		if s.Content == "" || s.Style.FillNone {
+			curX += widths[i]
+			continue
+		}
+		rc.drawTextRaw(s.Content, curX, float64(py), s.Style)
+		curX += widths[i]
+	}
+}
+
 // DrawText はテキストを描画します
 func (rc *RasterContext) DrawText(text *Text, st *style.ComputedStyle) {
 	log.Printf("DrawText: x=%f y=%f content='%s'", text.X, text.Y, text.Content)
@@ -1056,64 +1622,16 @@ func (rc *RasterContext) DrawText(text *Text, st *style.ComputedStyle) {
 
 	// ビューポート変換
 	px, py := rc.toPixelXY(text.X, text.Y)
-	scaleX, scaleY, _, _ := rc.scales()
-	// フォントサイズのスケール（X/Y の平均）
-	fontScale := (scaleX + scaleY) / 2.0
-	// SVG font-size は CSS px 単位。opentype.FaceOptions.Size はポイント単位なので変換する。
-	// 1px = 72/DPI pt（96DPIの場合: 1px = 0.75pt）
-	dpi := rc.viewport.DPI
-	if dpi == 0 {
-		dpi = 96
-	}
-	scaledFontSize := st.FontSize * fontScale * 72.0 / dpi
 
-	// フォントスタイルの決定
-	fontStyle := "Regular"
-	if st.FontStyle == "italic" || st.FontStyle == "oblique" {
-		fontStyle = "Italic"
-	}
-	if st.FontWeight == "bold" || st.FontWeight == "700" || st.FontWeight == "800" || st.FontWeight == "900" {
-		if fontStyle == "Italic" {
-			fontStyle = "BoldItalic"
-		} else {
-			fontStyle = "Bold"
-		}
-	}
-
-	// フォントファミリの優先順位
-	fontFamilies := []string{st.FontFamily}
-	// 汎用フォントファミリのフォールバック
-	switch strings.ToLower(st.FontFamily) {
-	case "sans-serif", "helvetica", "arial":
-		fontFamilies = append(fontFamilies, "Helvetica", "Arial", "Geneva", "FreeSans")
-	case "serif", "times", "times new roman":
-		fontFamilies = append(fontFamilies, "Times", "Times New Roman", "FreeSerif")
-	case "monospace", "courier", "courier new":
-		fontFamilies = append(fontFamilies, "Courier", "Courier New", "FreeMono")
-	}
-
-	// テキストの描画位置（SVGのy座標はベースライン）
 	textColor := st.Fill
 	if st.FillNone {
 		return // fill=none のテキストは見えない
 	}
 
-	// テキストを描画するフォントを決定（測定と描画で同じフォントを使う）
-	usedFamily := ""
-	var textWidth float64
-	for _, family := range fontFamilies {
-		w, err := rc.fontRenderer.MeasureText(text.Content, family, fontStyle, scaledFontSize)
-		if err == nil {
-			textWidth = w
-			usedFamily = family
-			break
-		}
-	}
-	if usedFamily == "" {
-		// フォントが全く見つからない場合のフォールバック
-		textWidth = float64(len([]rune(text.Content))) * scaledFontSize * 0.6
-	}
+	// テキスト幅を計測（letter-spacing 込み）
+	textWidth := rc.measureTextPix(text.Content, st)
 
+	// text-anchor に基づいて x 位置を調整
 	finalX := float64(px)
 	switch st.TextAnchor {
 	case "middle":
@@ -1123,13 +1641,21 @@ func (rc *RasterContext) DrawText(text *Text, st *style.ComputedStyle) {
 	}
 
 	// テキストを描画
-	if usedFamily != "" {
-		err := rc.fontRenderer.RenderText(text.Content, usedFamily, fontStyle, scaledFontSize, rc.fb.Image(), finalX, float64(py), textColor)
+	scaledFontSize := rc.scaledFontSizePt(st)
+	fontStyle := rc.fontStyleStr(st)
+	families := rc.fontFamilies(st)
+
+	if st.LetterSpacing != 0 {
+		rc.drawTextWithLetterSpacing(text.Content, finalX, float64(py), st, scaledFontSize, fontStyle, families, textColor)
+		return
+	}
+
+	for _, family := range families {
+		err := rc.fontRenderer.RenderText(text.Content, family, fontStyle, scaledFontSize, rc.fb.Image(), finalX, float64(py), textColor)
 		if err == nil {
-			log.Printf("Text rendered with font %s", usedFamily)
+			log.Printf("Text rendered with font %s", family)
 			return
 		}
-		log.Printf("Failed to render with %s: %v", usedFamily, err)
 	}
 
 	// 最終フォールバック: basicfont
@@ -1187,4 +1713,32 @@ func maxF32(a, b float32) float32 {
 		return a
 	}
 	return b
+}
+
+// parsePointsStrLocal は "x1,y1 x2,y2 ..." 形式のポイント文字列を解析します
+func parsePointsStrLocal(s string) [][2]float64 {
+	s = strings.ReplaceAll(s, ",", " ")
+	parts := strings.Fields(s)
+	var pts [][2]float64
+	for i := 0; i+1 < len(parts); i += 2 {
+		x, err1 := strconv.ParseFloat(parts[i], 64)
+		y, err2 := strconv.ParseFloat(parts[i+1], 64)
+		if err1 == nil && err2 == nil {
+			pts = append(pts, [2]float64{x, y})
+		}
+	}
+	return pts
+}
+
+// parseAttrF はElement属性を float64 として返します（デフォルト0）
+func parseAttrF(elem *parser.Element, key string) float64 {
+	v, ok := elem.Attributes[key]
+	if !ok {
+		return 0
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil {
+		return 0
+	}
+	return f
 }
