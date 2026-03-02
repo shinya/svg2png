@@ -361,19 +361,19 @@ func (rc *RasterContext) DrawPatternFill(
 			pcy := cy * scaleY
 			pr := r * (scaleX + scaleY) / 2
 
-			// 小円を描画
+			// 小円を描画（ストレートalphaで保存）
 			for iy := 0; iy < tileBounds.Dy(); iy++ {
 				for ix := 0; ix < tileBounds.Dx(); ix++ {
-					dx := float64(ix) - pcx
-					dy := float64(iy) - pcy
-					if dx*dx+dy*dy <= pr*pr {
-						a := fillOp * float64(col.A) / 255.0
-						bg := tile.RGBAAt(ix, iy)
+					ddx := float64(ix) - pcx
+					ddy := float64(iy) - pcy
+					if ddx*ddx+ddy*ddy <= pr*pr {
+						// ストレートalpha: RGBは元の色、Aにだけopacityを適用
+						tileA := uint8(fillOp * float64(col.A))
 						tile.SetRGBA(ix, iy, color.RGBA{
-							R: uint8(float64(col.R)*a + float64(bg.R)*(1-a)),
-							G: uint8(float64(col.G)*a + float64(bg.G)*(1-a)),
-							B: uint8(float64(col.B)*a + float64(bg.B)*(1-a)),
-							A: uint8(math.Min(255, float64(bg.A)+255*a)),
+							R: col.R,
+							G: col.G,
+							B: col.B,
+							A: tileA,
 						})
 					}
 				}

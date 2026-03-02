@@ -148,11 +148,13 @@ func (rc *RasterContext) drawTextRaw(content string, pixX, pixY float64, st *sty
 	}
 
 	for _, family := range families {
-		if err := rc.fontRenderer.RenderText(content, family, fontStyle, scaledFontSize, rc.fb.Image(), pixX, pixY, textColor); err == nil {
-			return
+		if rc.fontRenderer.FindFont(family, fontStyle) != nil {
+			if err := rc.fontRenderer.RenderText(content, family, fontStyle, scaledFontSize, rc.fb.Image(), pixX, pixY, textColor); err == nil {
+				return
+			}
 		}
 	}
-	// フォールバック
+	// フォールバック: basicfont
 	_ = rc.fontRenderer.RenderText(content, "", fontStyle, scaledFontSize, rc.fb.Image(), pixX, pixY, textColor)
 }
 
@@ -351,6 +353,16 @@ func (rc *RasterContext) drawURLFill(alpha *image.Alpha, fillURL string, bounds 
 func (rc *RasterContext) DrawRect(rect *Rect, st *style.ComputedStyle) {
 	log.Printf("DrawRect: x=%f y=%f w=%f h=%f", rect.X, rect.Y, rect.Width, rect.Height)
 
+	// フィルター適用
+	if st.FilterID != "" {
+		stNoFilter := *st
+		stNoFilter.FilterID = ""
+		tmp := rc.renderToTempBuffer()
+		tmp.DrawRect(rect, &stNoFilter)
+		rc.applyFilterToLayer(tmp.fb.Image(), st.FilterID, 1.0)
+		return
+	}
+
 	x1, y1 := rc.toPixelXY(rect.X, rect.Y)
 	x2, y2 := rc.toPixelXY(rect.X+rect.Width, rect.Y+rect.Height)
 
@@ -464,6 +476,16 @@ func (rc *RasterContext) DrawCircle(circle *Circle, st *style.ComputedStyle) {
 
 // DrawEllipse は楕円を描画します
 func (rc *RasterContext) DrawEllipse(ellipse *Ellipse, st *style.ComputedStyle) {
+	// フィルター適用
+	if st.FilterID != "" {
+		stNoFilter := *st
+		stNoFilter.FilterID = ""
+		tmp := rc.renderToTempBuffer()
+		tmp.DrawEllipse(ellipse, &stNoFilter)
+		rc.applyFilterToLayer(tmp.fb.Image(), st.FilterID, 1.0)
+		return
+	}
+
 	cx, cy := rc.toPixelXY(ellipse.CX, ellipse.CY)
 	rx := float32(rc.scaleLenX(ellipse.RX))
 	ry := float32(rc.scaleLenY(ellipse.RY))
@@ -694,6 +716,16 @@ func (rc *RasterContext) DrawPolyline(points []Point, st *style.ComputedStyle, c
 		return
 	}
 
+	// フィルター適用
+	if st.FilterID != "" {
+		stNoFilter := *st
+		stNoFilter.FilterID = ""
+		tmp := rc.renderToTempBuffer()
+		tmp.DrawPolyline(points, &stNoFilter, closed)
+		rc.applyFilterToLayer(tmp.fb.Image(), st.FilterID, 1.0)
+		return
+	}
+
 	w, h := rc.fb.Bounds().Dx(), rc.fb.Bounds().Dy()
 
 	// Fill（polygon のみ）
@@ -756,6 +788,16 @@ func (rc *RasterContext) DrawPolyline(points []Point, st *style.ComputedStyle, c
 func (rc *RasterContext) DrawPath(path *Path, st *style.ComputedStyle) {
 	log.Printf("DrawPath: d=%s", path.Data)
 	if path.Data == "" {
+		return
+	}
+
+	// フィルター適用
+	if st.FilterID != "" {
+		stNoFilter := *st
+		stNoFilter.FilterID = ""
+		tmp := rc.renderToTempBuffer()
+		tmp.DrawPath(path, &stNoFilter)
+		rc.applyFilterToLayer(tmp.fb.Image(), st.FilterID, 1.0)
 		return
 	}
 
@@ -1651,10 +1693,12 @@ func (rc *RasterContext) DrawText(text *Text, st *style.ComputedStyle) {
 	}
 
 	for _, family := range families {
-		err := rc.fontRenderer.RenderText(text.Content, family, fontStyle, scaledFontSize, rc.fb.Image(), finalX, float64(py), textColor)
-		if err == nil {
-			log.Printf("Text rendered with font %s", family)
-			return
+		if rc.fontRenderer.FindFont(family, fontStyle) != nil {
+			err := rc.fontRenderer.RenderText(text.Content, family, fontStyle, scaledFontSize, rc.fb.Image(), finalX, float64(py), textColor)
+			if err == nil {
+				log.Printf("Text rendered with font %s", family)
+				return
+			}
 		}
 	}
 

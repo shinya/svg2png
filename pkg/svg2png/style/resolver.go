@@ -26,6 +26,7 @@ type ComputedStyle struct {
 	FontWeight    string
 	TextAnchor    string
 	ClipPathID    string    // clip-path="url(#id)"
+	FilterID      string    // filter="url(#id)"
 	StrokeDasharray  []float64  // stroke-dasharray
 	StrokeDashoffset float64    // stroke-dashoffset
 	LetterSpacing    float64    // letter-spacing (px)
@@ -169,6 +170,8 @@ func (r *StyleResolver) applyProperty(key, value string, style *ComputedStyle) {
 		}
 	case "clip-path":
 		style.ClipPathID = extractURLID(value)
+	case "filter":
+		style.FilterID = extractURLID(value)
 	case "font-family":
 		// カンマ区切りの最初のフォントを使用
 		families := strings.Split(value, ",")

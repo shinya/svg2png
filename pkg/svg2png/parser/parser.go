@@ -37,6 +37,24 @@ type Defs struct {
 	RadialGradients map[string]*RadialGradient
 	ClipPaths       map[string]*Element // clipPath要素（子要素ごとレンダリングに使う）
 	Patterns        map[string]*Element // pattern要素
+	Filters         map[string]*FilterDef
+}
+
+// FilterDef はSVGフィルター定義を表します
+type FilterDef struct {
+	ID         string
+	Primitives []FilterPrimitive
+}
+
+// FilterPrimitive はフィルタープリミティブを表します
+type FilterPrimitive struct {
+	Type          string  // "feGaussianBlur", "feComposite" など
+	StdDeviationX float64 // feGaussianBlur 用
+	StdDeviationY float64 // feGaussianBlur 用
+	Result        string  // result 属性（名前付き中間結果）
+	In            string  // in 属性（入力ソース）
+	In2           string  // in2 属性（第2入力ソース）
+	Operator      string  // feComposite 用
 }
 
 // GradientStop はグラデーションのカラーストップです
@@ -190,6 +208,7 @@ func parseDefs(root *Element) *Defs {
 		RadialGradients: make(map[string]*RadialGradient),
 		ClipPaths:       make(map[string]*Element),
 		Patterns:        make(map[string]*Element),
+		Filters:         make(map[string]*FilterDef),
 	}
 
 	for _, child := range root.Children {
@@ -242,7 +261,52 @@ func processDefsElement(defs *Defs, defsElem *Element) {
 			defs.ClipPaths[id] = def
 		case "pattern":
 			defs.Patterns[id] = def
+		case "filter":
+			fd := &FilterDef{ID: id}
+			for _, prim := range def.Children {
+				fp := parseFilterPrimitive(prim)
+				if fp != nil {
+					fd.Primitives = append(fd.Primitives, *fp)
+				}
+			}
+			defs.Filters[id] = fd
 		}
+	}
+}
+
+// parseFilterPrimitive はフィルタープリミティブ要素をパースします
+func parseFilterPrimitive(elem *Element) *FilterPrimitive {
+	fp := &FilterPrimitive{
+		Type:   elem.Name,
+		Result: elem.Attributes["result"],
+		In:     elem.Attributes["in"],
+		In2:    elem.Attributes["in2"],
+	}
+	switch elem.Name {
+	case "feGaussianBlur":
+		sd := elem.Attributes["stdDeviation"]
+		sd = strings.TrimSpace(sd)
+		parts := strings.Fields(strings.ReplaceAll(sd, ",", " "))
+		if len(parts) == 1 {
+			if v, err := strconv.ParseFloat(parts[0], 64); err == nil {
+				fp.StdDeviationX = v
+				fp.StdDeviationY = v
+			}
+		} else if len(parts) >= 2 {
+			if x, err := strconv.ParseFloat(parts[0], 64); err == nil {
+				fp.StdDeviationX = x
+			}
+			if y, err := strconv.ParseFloat(parts[1], 64); err == nil {
+				fp.StdDeviationY = y
+			}
+		}
+		return fp
+	case "feComposite":
+		fp.Operator = elem.Attributes["operator"]
+		return fp
+	default:
+		// 未対応のプリミティブも記録（将来の拡張用）
+		return fp
 	}
 }
 
