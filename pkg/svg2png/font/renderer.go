@@ -105,6 +105,43 @@ func (r *Renderer) LoadFont(fontInfo *FontInfo) error {
 	return nil
 }
 
+// LoadFontFromCollection はTTCファイルからフォントを読み込みます
+func (r *Renderer) LoadFontFromCollection(family, style string, ttcData []byte, index int) error {
+	key := fmt.Sprintf("%s-%s", family, style)
+
+	if _, exists := r.fonts[key]; exists {
+		return nil
+	}
+
+	sfntCollection, err := sfnt.ParseCollection(ttcData)
+	if err != nil {
+		return fmt.Errorf("failed to parse TTC for SFNT: %w", err)
+	}
+	sfntFont, err := sfntCollection.Font(index)
+	if err != nil {
+		return fmt.Errorf("failed to get SFNT font %d: %w", index, err)
+	}
+
+	otCollection, err := opentype.ParseCollection(ttcData)
+	if err != nil {
+		return fmt.Errorf("failed to parse TTC for OpenType: %w", err)
+	}
+	otFont, err := otCollection.Font(index)
+	if err != nil {
+		return fmt.Errorf("failed to get OpenType font %d: %w", index, err)
+	}
+
+	r.fonts[key] = &FontFace{
+		Family: family,
+		Style:  style,
+		Font:   sfntFont,
+		OTFont: otFont,
+	}
+
+	log.Printf("Font loaded from TTC: %s", key)
+	return nil
+}
+
 // GetFont は指定されたキーのフォントを取得します
 func (r *Renderer) GetFont(family, style string) (*FontFace, error) {
 	key := fmt.Sprintf("%s-%s", family, style)

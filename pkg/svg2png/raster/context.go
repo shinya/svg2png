@@ -35,13 +35,14 @@ func NewRasterContext(fb *FrameBuffer, fontRenderer *font.Renderer, vp *viewport
 	}
 }
 
-// ビューポートスケール情報
+// ビューポートスケール情報（均一スケーリング対応）
 func (rc *RasterContext) scales() (scaleX, scaleY, offsetX, offsetY float64) {
 	vb := rc.viewport.ViewBox
-	scaleX = rc.viewport.Width / vb.Width
-	scaleY = rc.viewport.Height / vb.Height
-	offsetX = -vb.X * scaleX
-	offsetY = -vb.Y * scaleY
+	s := rc.viewport.Scale
+	scaleX = s
+	scaleY = s
+	offsetX = rc.viewport.OffsetX - vb.X*s
+	offsetY = rc.viewport.OffsetY - vb.Y*s
 	return
 }
 
@@ -316,7 +317,8 @@ func (rc *RasterContext) compositeAlpha(alpha *image.Alpha, col color.Color, opa
 			newR := uint8(cr*a + float64(bg.R)*(1-a))
 			newG := uint8(cg*a + float64(bg.G)*(1-a))
 			newB := uint8(cb*a + float64(bg.B)*(1-a))
-			newA := uint8(math.Min(255, float64(bg.A)+float64(mask)*opacity))
+			// porter-duff "over" : outA = srcA + dstA * (1 - srcA)
+			newA := uint8(math.Min(255, a*255+float64(bg.A)*(1-a)))
 
 			img.SetRGBA(px, py, color.RGBA{newR, newG, newB, newA})
 		}

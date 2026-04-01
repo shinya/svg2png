@@ -221,7 +221,7 @@ func TestRenderPNG_Options(t *testing.T) {
 		},
 		{
 			name: "System font scan enabled",
-			opts: Options{Width: 100, Height: 100, SystemFontScan: true},
+			opts: Options{Width: 100, Height: 100, DisableSystemFontScan: false},
 		},
 	}
 

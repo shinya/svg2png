@@ -18,6 +18,7 @@ type FontSource = font.FontSource
 // Options はレンダリングオプションを表します
 type Options struct {
 	Width, Height         int
+	Scale                 float64     // スケール倍率（Width/Heightが0の場合に適用、既定1.0）
 	DPI                   float64     // 既定 96
 	Background            *color.RGBA // nilで透過
 	DefaultFamily         string      // 既定フォント（fallback最終手段）
@@ -72,17 +73,27 @@ func RenderPNG(svg []byte, opts Options) (png []byte, diag Diagnostics, err erro
 		return nil, Diagnostics{}, err
 	}
 
+	// スケール倍率
+	scaleFactor := opts.Scale
+	if scaleFactor <= 0 {
+		scaleFactor = 1.0
+	}
+
 	// ビューポート解決
-	vp, err := viewport.ResolveViewport(doc, opts.Width, opts.Height, opts.DPI)
+	vp, err := viewport.ResolveViewport(doc, opts.Width, opts.Height, opts.DPI, scaleFactor)
 	if err != nil {
 		return nil, Diagnostics{}, err
 	}
+
+	// ビューポートから解決された実際の出力サイズを使用
+	outWidth := int(vp.Width)
+	outHeight := int(vp.Height)
 
 	// スタイル解決器作成
 	styleResolver := style.NewResolver(opts.DefaultFamily)
 
 	// フレームバッファ作成
-	fb := raster.NewFrameBuffer(opts.Width, opts.Height, opts.Background)
+	fb := raster.NewFrameBuffer(outWidth, outHeight, opts.Background)
 
 	// フォントレンダラーを取得
 	fontRenderer := globalFontManager.GetRenderer()

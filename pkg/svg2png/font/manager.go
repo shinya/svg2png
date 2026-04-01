@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"golang.org/x/image/font/sfnt"
 )
 
 // FontInfo はフォントの情報を表します
@@ -197,14 +199,24 @@ func (m *Manager) scanDirectory(dir string) error {
 		}
 
 		ext := strings.ToLower(filepath.Ext(path))
-		if ext != ".ttf" && ext != ".otf" {
+		if ext != ".ttf" && ext != ".otf" && ext != ".ttc" {
 			return nil
 		}
 
-		// フォント情報の読み取り（簡易版）
-		family, style, err := extractFontInfo(path)
+		if ext == ".ttc" {
+			// TrueType Collection: 複数フォントを含むファイル
+			m.scanTTCFile(path)
+			return nil
+		}
+
+		// 単一フォントファイル: メタデータから情報を抽出
+		family, style, err := extractFontInfoFromFile(path)
 		if err != nil {
-			return nil // エラーは無視して続行
+			// フォールバック: ファイル名から推測
+			family, style, err = extractFontInfo(path)
+			if err != nil {
+				return nil
+			}
 		}
 
 		// フォントの登録
@@ -261,7 +273,100 @@ func normalizeStyle(style string) string {
 	}
 }
 
-// extractFontInfo はフォントファイルから情報を抽出します（簡易版）
+// scanTTCFile はTrueType Collectionファイルをスキャンして個別フォントを登録します
+func (m *Manager) scanTTCFile(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("Warning: failed to read TTC file %s: %v", path, err)
+		return
+	}
+
+	collection, err := sfnt.ParseCollection(data)
+	if err != nil {
+		log.Printf("Warning: failed to parse TTC file %s: %v", path, err)
+		return
+	}
+
+	numFonts := collection.NumFonts()
+	for i := 0; i < numFonts; i++ {
+		f, err := collection.Font(i)
+		if err != nil {
+			log.Printf("Warning: failed to get font %d from %s: %v", i, path, err)
+			continue
+		}
+
+		family, style := extractFontInfoFromSFNT(f)
+		if family == "" {
+			continue
+		}
+
+		key := fmt.Sprintf("%s-%s", family, normalizeStyle(style))
+		if _, exists := m.renderer.fonts[key]; exists {
+			continue // 既に登録済み
+		}
+
+		// TTC用の特別な登録（sfnt.Fontを直接使用）
+		if err := m.registerTTCFont(family, style, f, data, i); err != nil {
+			log.Printf("Warning: skipping TTC font %s/%s from %s: %v", family, style, path, err)
+		}
+	}
+}
+
+// registerTTCFont はTTCファイル内の個別フォントを登録します
+func (m *Manager) registerTTCFont(family, style string, f *sfnt.Font, ttcData []byte, index int) error {
+	normalizedStyle := normalizeStyle(style)
+
+	if m.fonts[family] == nil {
+		m.fonts[family] = make(map[string]*FontInfo)
+	}
+
+	fontInfo := &FontInfo{
+		Family: family,
+		Style:  normalizedStyle,
+	}
+	m.fonts[family][normalizedStyle] = fontInfo
+
+	// レンダラーに直接登録（opentype.ParseCollectionを使用）
+	return m.renderer.LoadFontFromCollection(family, normalizedStyle, ttcData, index)
+}
+
+// extractFontInfoFromFile はフォントファイルのメタデータからファミリ名とスタイルを抽出します
+func extractFontInfoFromFile(path string) (family, style string, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", err
+	}
+	f, err := sfnt.Parse(data)
+	if err != nil {
+		return "", "", err
+	}
+	family, style = extractFontInfoFromSFNT(f)
+	if family == "" {
+		return "", "", fmt.Errorf("could not extract font family name")
+	}
+	return family, style, nil
+}
+
+// extractFontInfoFromSFNT はsfnt.Fontからファミリ名とスタイルを抽出します
+func extractFontInfoFromSFNT(f *sfnt.Font) (family, style string) {
+	var buf sfnt.Buffer
+
+	// ファミリ名を取得（NameIDFamily = 1）
+	if name, err := f.Name(&buf, sfnt.NameIDFamily); err == nil && name != "" {
+		family = name
+	}
+	// サブファミリ（スタイル）を取得（NameIDSubfamily = 2）
+	if name, err := f.Name(&buf, sfnt.NameIDSubfamily); err == nil && name != "" {
+		style = name
+	}
+
+	if style == "" {
+		style = "Regular"
+	}
+	return family, style
+}
+
+// extractFontInfo はフォントファイルから情報を抽出します（簡易版、ファイル名ベース）
 func extractFontInfo(path string) (family, style string, err error) {
 	// 実際の実装では、TTF/OTFファイルのnameテーブルを読み取る
 	// ここでは簡易的にファイル名から推測

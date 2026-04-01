@@ -16,8 +16,9 @@ func main() {
 	var (
 		inputFile             = flag.String("in", "", "入力SVGファイル")
 		outputFile            = flag.String("out", "", "出力PNGファイル")
-		width                 = flag.Int("w", 800, "出力幅")
-		height                = flag.Int("h", 600, "出力高さ")
+		width                 = flag.Int("w", 0, "出力幅（0でSVGから自動計算）")
+		height                = flag.Int("h", 0, "出力高さ（0でSVGから自動計算）")
+		scale                 = flag.Float64("scale", 1, "スケール倍率（-wと-hが0の場合に適用）")
 		background            = flag.String("bg", "transparent", "背景色（transparent、#RRGGBB、色名）")
 		dpi                   = flag.Float64("dpi", 96, "DPI")
 		noSystemFontScan      = flag.Bool("no-system-font-scan", false, "システムフォントのスキャンを無効にする")
@@ -56,6 +57,7 @@ func main() {
 	opts := svg2png.Options{
 		Width:                 *width,
 		Height:                *height,
+		Scale:                 *scale,
 		DPI:                   *dpi,
 		Background:            bgColor,
 		DisableSystemFontScan: *noSystemFontScan,
@@ -94,7 +96,7 @@ func main() {
 		}
 	}
 
-	fmt.Printf("変換完了: %s -> %s (%dx%d)\n", *inputFile, *outputFile, *width, *height)
+	fmt.Printf("変換完了: %s -> %s\n", *inputFile, *outputFile)
 }
 
 // printUsage は使用方法を表示します
